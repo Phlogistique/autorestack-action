@@ -7,6 +7,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  repository-projects: read # See https://github.com/cli/cli/discussions/5307
 
 jobs:
   update-pr-stack:
