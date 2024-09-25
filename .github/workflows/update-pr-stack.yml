@@ -1,0 +1,27 @@
+name: Optimized Recursive Update of PR Stack on Squash Merge
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  update-pr-stack:
+    if: github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Update PR stack
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: github-actions
+          GIT_AUTHOR_EMAIL: github-actions@github.com
+          GIT_COMMITTER_NAME: github-actions
+          GIT_COMMITTER_EMAIL: github-actions@github.com
+          SQUASH_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+          MERGED_BRANCH: ${{ github.event.pull_request.head.ref }}
+          TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: ./update-pr-stack.sh
