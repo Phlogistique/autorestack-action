@@ -9,13 +9,7 @@
 
 set -e  # Exit immediately if a command exits with a non-zero status.
 
-# Function to log and execute git commands
-git_cmd() {
-    printf "Executing: git" >&2
-    printf " %q" "$@" >&2
-    printf "\n" >&2
-    git "$@"
-}
+source ./command_utils.sh
 
 # Function to check if a required environment variable is set
 check_env_var() {
@@ -30,17 +24,17 @@ update_direct_target() {
     local BASE_BRANCH="$2"
 
     echo "Updating direct target $BRANCH (from $MERGED_BRANCH to $BASE_BRANCH)"
-    git_cmd checkout "$BRANCH"
+    log_cmd git checkout "$BRANCH"
 
-    ORIGINAL_HEAD=$(git_cmd rev-parse HEAD)
-    git_cmd merge --no-edit "origin/$MERGED_BRANCH"
-    git_cmd merge --no-edit "${SQUASH_COMMIT}~"
-    git_cmd merge --no-edit -s ours "$SQUASH_COMMIT"
+    ORIGINAL_HEAD=$(log_cmd git rev-parse HEAD)
+    log_cmd git merge --no-edit "origin/$MERGED_BRANCH"
+    log_cmd git merge --no-edit "${SQUASH_COMMIT}~"
+    log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
 
-    TREE_HASH=$(git_cmd rev-parse "HEAD^{tree}")
+    TREE_HASH=$(log_cmd git rev-parse "HEAD^{tree}")
     COMMIT_MSG="Merge updates from $BASE_BRANCH and squash commit"
-    CUSTOM_COMMIT=$(git_cmd commit-tree "$TREE_HASH" -p "$ORIGINAL_HEAD" -p "origin/$MERGED_BRANCH" -p "$SQUASH_COMMIT" -m "$COMMIT_MSG")
-    git_cmd reset --hard "$CUSTOM_COMMIT"
+    CUSTOM_COMMIT=$(log_cmd git commit-tree "$TREE_HASH" -p "$ORIGINAL_HEAD" -p "origin/$MERGED_BRANCH" -p "$SQUASH_COMMIT" -m "$COMMIT_MSG")
+    log_cmd git reset --hard "$CUSTOM_COMMIT"
 }
 
 update_indirect_target() {
@@ -48,8 +42,8 @@ update_indirect_target() {
     local BASE_BRANCH="$2"
 
     echo "Updating indirect target $BRANCH (based on $BASE_BRANCH)"
-    git_cmd checkout "$BRANCH"
-    git_cmd merge --no-edit "origin/$BASE_BRANCH"
+    log_cmd git checkout "$BRANCH"
+    log_cmd git merge --no-edit "origin/$BASE_BRANCH"
 }
 
 ALL_CHILDREN=()
@@ -58,7 +52,7 @@ update_branch_recursive() {
     local BASE_BRANCH="$2"
 
     # Find and update branches based on this one
-    CHILD_BRANCHES=$(gh pr list --base "$BRANCH" --json headRefName --jq '.[].headRefName')
+    CHILD_BRANCHES=$(log_cmd gh pr list --base "$BRANCH" --json headRefName --jq '.[].headRefName')
     ALL_CHILDREN+=($CHILD_BRANCHES)
     for CHILD_BRANCH in $CHILD_BRANCHES; do
         update_indirect_target "$CHILD_BRANCH" "$BRANCH"
@@ -73,7 +67,7 @@ main() {
     check_env_var "TARGET_BRANCH"
 
     # Find all PRs directly targeting the merged PR's head
-    INITIAL_TARGETS=($(gh pr list --base "$MERGED_BRANCH" --json headRefName --jq '.[].headRefName'))
+    INITIAL_TARGETS=($(log_cmd gh pr list --base "$MERGED_BRANCH" --json headRefName --jq '.[].headRefName'))
 
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
         update_direct_target "$BRANCH" "$TARGET_BRANCH"
@@ -82,11 +76,11 @@ main() {
 
     # Update base branches for direct target PRs
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
-        gh pr edit "$BRANCH" --base "$TARGET_BRANCH"
+        log_cmd gh pr edit "$BRANCH" --base "$TARGET_BRANCH"
     done
 
     # Push all updated branches and delete the merged branch
-    git_cmd push origin ":$MERGED_BRANCH" "${INITAL_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+    log_cmd git push origin ":$MERGED_BRANCH" "${INITAL_TARGETS[@]}" "${ALL_CHILDREN[@]}"
 }
 
 # Only run main() if the script is executed directly (not sourced)
