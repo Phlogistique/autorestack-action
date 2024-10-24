@@ -7,7 +7,7 @@
 # MERGED_BRANCH - The name of the branch that was merged and will be deleted
 # TARGET_BRANCH - The name of the branch that the PR was merged into
 
-set -e  # Exit immediately if a command exits with a non-zero status.
+set -ue  # Exit immediately if a command exits with a non-zero status.
 
 source ./command_utils.sh
 
@@ -26,14 +26,14 @@ update_direct_target() {
     echo "Updating direct target $BRANCH (from $MERGED_BRANCH to $BASE_BRANCH)"
     log_cmd git checkout "$BRANCH"
 
-    ORIGINAL_HEAD=$(log_cmd git rev-parse HEAD)
+    log_cmd git update-ref BEFORE_MERGE HEAD
     log_cmd git merge --no-edit "origin/$MERGED_BRANCH"
     log_cmd git merge --no-edit "${SQUASH_COMMIT}~"
     log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
 
-    TREE_HASH=$(log_cmd git rev-parse "HEAD^{tree}")
+    log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
     COMMIT_MSG="Merge updates from $BASE_BRANCH and squash commit"
-    CUSTOM_COMMIT=$(log_cmd git commit-tree "$TREE_HASH" -p "$ORIGINAL_HEAD" -p "origin/$MERGED_BRANCH" -p "$SQUASH_COMMIT" -m "$COMMIT_MSG")
+    CUSTOM_COMMIT=$(log_cmd git commit-tree MERGE_RESULT -p BEFORE_MERGE -p "origin/$MERGED_BRANCH" -p SQUASH_COMMIT -m "$COMMIT_MSG")
     log_cmd git reset --hard "$CUSTOM_COMMIT"
 }
 
@@ -66,6 +66,8 @@ main() {
     check_env_var "MERGED_BRANCH"
     check_env_var "TARGET_BRANCH"
 
+    log_cmd git update-ref SQUASH_COMMIT "$SQUASH_COMMIT"
+
     # Find all PRs directly targeting the merged PR's head
     INITIAL_TARGETS=($(log_cmd gh pr list --base "$MERGED_BRANCH" --json headRefName --jq '.[].headRefName'))
 
@@ -80,7 +82,7 @@ main() {
     done
 
     # Push all updated branches and delete the merged branch
-    log_cmd git push origin ":$MERGED_BRANCH" "${INITAL_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+    log_cmd git push origin ":$MERGED_BRANCH" "${INITIAL_TARGETS[@]}" "${ALL_CHILDREN[@]}"
 }
 
 # Only run main() if the script is executed directly (not sourced)
