@@ -10,13 +10,10 @@ TEST_REPO=$(mktemp -d)
 cd "$TEST_REPO"
 echo "Created test repo at $TEST_REPO"
 
-# Initialize a repo and set up basic config
-git init
+# Initialize a repo, set the initial branch name to main, and set up basic config
+git init -b main
 git config user.email "test@example.com"
 git config user.name "Test User"
-
-# Create and checkout the main branch *before* the first commit
-git checkout -b main
 
 # Create initial commit on main branch
 echo "Initial line 1" > file.txt
