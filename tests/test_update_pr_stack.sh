@@ -32,7 +32,7 @@ sed -i '2s/.*/Feature 1 content line 2/' file.txt # Edit line 2
 git add file.txt
 git commit -m "Add feature 1"
 
-# Make a note of the commit we'll squash
+# Make a note of the commit we'll squash/cherry-pick
 FEATURE1_COMMIT=$(git rev-parse HEAD)
 
 # Create feature2 branch based on feature1 - Modify line 2
@@ -47,16 +47,13 @@ sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2
 git add file.txt
 git commit -m "Add feature 3"
 
-# Simulate a squash merge of feature1 into main
+# Simulate a squash merge of feature1 into main by cherry-picking
 git checkout main
-echo "Initial line 1" > file.txt
-echo "Feature 1 content line 2" >> file.txt # Reflect feature1 change on line 2
-echo "Initial line 3" >> file.txt
-git add file.txt
-git commit -m "Squashed: Add feature 1"
-SQUASH_COMMIT=$(git rev-parse HEAD) # Get the hash of the squash commit
+git cherry-pick "$FEATURE1_COMMIT" # Apply the changes from feature1's commit
+# The cherry-pick creates a *new* commit on main, simulating the squash merge result
+SQUASH_COMMIT=$(git rev-parse HEAD) # Get the hash of the new commit on main
 
-echo "Squash commit: $SQUASH_COMMIT"
+echo "Simulated Squash commit (via cherry-pick): $SQUASH_COMMIT"
 
 # Copy the necessary scripts to the test repo
 mkdir -p scripts
@@ -82,6 +79,7 @@ if git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
     echo "✅ feature2 includes the squash commit"
 else
     echo "❌ feature2 does not include the squash commit"
+    git log --graph --oneline --all
     exit 1
 fi
 
@@ -91,6 +89,7 @@ if git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
     echo "✅ feature3 includes the squash commit"
 else
     echo "❌ feature3 does not include the squash commit"
+    git log --graph --oneline --all
     exit 1
 fi
 
@@ -108,24 +107,58 @@ git checkout feature2
 echo -e "\nDiff between main and feature2:"
 git diff main...feature2
 DIFF_COUNT=$(git diff main...feature2 | grep -c "^[+-][^+-]")
-if [[ "$DIFF_COUNT" -gt 0 ]]; then
+# After rebase, the diff should only contain the changes unique to feature2
+# In this conflict scenario, feature2's change should overwrite feature1's change
+EXPECTED_DIFF2=$(cat <<EOF
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,3 @@
+ Initial line 1
+-Feature 1 content line 2
++Feature 2 content line 2
+ Initial line 3
+EOF
+)
+ACTUAL_DIFF2=$(git diff main...feature2)
+if [[ "$ACTUAL_DIFF2" == "$EXPECTED_DIFF2" ]]; then
     echo "✅ Triple dot diff for feature2 shows expected changes"
 else
     echo "❌ Triple dot diff for feature2 doesn't show expected changes"
+    echo "Expected:"
+    echo "$EXPECTED_DIFF2"
+    echo "Actual:"
+    echo "$ACTUAL_DIFF2"
     exit 1
 fi
+
 
 # Test triple dot diff on feature3
 git checkout feature3
 echo -e "\nDiff between main and feature3:"
 git diff main...feature3
-DIFF_COUNT=$(git diff main...feature3 | grep -c "^[+-][^+-]")
-if [[ "$DIFF_COUNT" -gt 0 ]]; then
+# After rebase, the diff should only contain the changes unique to feature3 relative to main
+EXPECTED_DIFF3=$(cat <<EOF
+--- a/file.txt
++++ b/file.txt
+@@ -1,3 +1,3 @@
+ Initial line 1
+-Feature 1 content line 2
++Feature 3 content line 2
+ Initial line 3
+EOF
+)
+ACTUAL_DIFF3=$(git diff main...feature3)
+if [[ "$ACTUAL_DIFF3" == "$EXPECTED_DIFF3" ]]; then
     echo "✅ Triple dot diff for feature3 shows expected changes"
 else
     echo "❌ Triple dot diff for feature3 doesn't show expected changes"
+    echo "Expected:"
+    echo "$EXPECTED_DIFF3"
+    echo "Actual:"
+    echo "$ACTUAL_DIFF3"
     exit 1
 fi
+
 
 # Test idempotence by running the update again
 cd "$TEST_REPO/scripts"
@@ -153,6 +186,7 @@ if [[ "$FEATURE2_COMMIT_BEFORE" == "$FEATURE2_COMMIT_AFTER" ]]; then
     echo "✅ Idempotence test passed for feature2"
 else
     echo "❌ Idempotence test failed for feature2"
+    git log --graph --oneline --all
     exit 1
 fi
 
@@ -160,6 +194,7 @@ if [[ "$FEATURE3_COMMIT_BEFORE" == "$FEATURE3_COMMIT_AFTER" ]]; then
     echo "✅ Idempotence test passed for feature3"
 else
     echo "❌ Idempotence test failed for feature3"
+    git log --graph --oneline --all
     exit 1
 fi
 
@@ -169,3 +204,4 @@ echo -e "\nAll tests passed! 🎉"
 # cd /tmp
 # rm -rf "$TEST_REPO"
 echo "Test repository remains at: $TEST_REPO for inspection"
+
