@@ -77,14 +77,17 @@ echo "Simulated Squash commit (via cherry-pick): $SQUASH_COMMIT"
 
 echo "Running update-pr-stack.sh..."
 # The update script sources command_utils.sh itself
-log_cmd \
-  env \
-  SQUASH_COMMIT=$SQUASH_COMMIT \
-  MERGED_BRANCH=feature1 \
-  TARGET_BRANCH=main \
-  GH="$SCRIPT_DIR/mock_gh.sh" \
-  GIT="$SCRIPT_DIR/mock_git.sh" \
-  $SCRIPT_DIR/../update-pr-stack.sh
+run_update_pr_stack() {
+  log_cmd \
+    env \
+    SQUASH_COMMIT=$SQUASH_COMMIT \
+    MERGED_BRANCH=feature1 \
+    TARGET_BRANCH=main \
+    GH="$SCRIPT_DIR/mock_gh.sh" \
+    GIT="$SCRIPT_DIR/mock_git.sh" \
+    $SCRIPT_DIR/../update-pr-stack.sh
+}
+run_update_pr_stack
 
 # Verify the results
 cd "$TEST_REPO"
@@ -115,13 +118,10 @@ echo -e "\nContent of feature3 branch:"
 log_cmd git show feature3:file.txt
 
 # Test triple dot diff on feature2
-log_cmd git checkout feature2
-echo -e "\nDiff between main and feature2:"
-log_cmd git diff main...feature2
 # After rebase, the diff should only contain the changes unique to feature2
 # In this conflict scenario, feature2's change should overwrite feature1's change
-# Filter out the 'index ...' line which contains changing hashes
-EXPECTED_DIFF2=$(cat <<EOF | grep -v '^index '
+EXPECTED_DIFF2=$(cat <<EOF
+diff --git a/file.txt b/file.txt
 --- a/file.txt
 +++ b/file.txt
 @@ -1,3 +1,3 @@
@@ -131,26 +131,29 @@ EXPECTED_DIFF2=$(cat <<EOF | grep -v '^index '
  Initial line 3
 EOF
 )
-ACTUAL_DIFF2=$(log_cmd git diff main...feature2 | grep -v '^index ')
+ACTUAL_DIFF2=$(log_cmd git diff main...feature2 | grep -v '^index')
 if [[ "$ACTUAL_DIFF2" == "$EXPECTED_DIFF2" ]]; then
-    echo "✅ Triple dot diff for feature2 shows expected changes (ignoring index line)"
+    echo "✅ Triple dot diff for feature2 shows expected changes"
 else
-    echo "❌ Triple dot diff for feature2 doesn't show expected changes (ignoring index line)"
+    echo "❌ Triple dot diff for feature2 doesn't show expected changes"
     echo "Expected:"
     echo "$EXPECTED_DIFF2"
     echo "Actual:"
     echo "$ACTUAL_DIFF2"
+    echo "Diff:"
+    diff <(
+    echo "$EXPECTED_DIFF2"
+    ) <(
+    echo "$ACTUAL_DIFF2"
+    )
     exit 1
 fi
 
 
 # Test triple dot diff on feature3
-log_cmd git checkout feature3
-echo -e "\nDiff between main and feature3:"
-log_cmd git diff main...feature3
 # After rebase, the diff should only contain the changes unique to feature3 relative to main
-# Filter out the 'index ...' line which contains changing hashes
-EXPECTED_DIFF3=$(cat <<EOF | grep -v '^index '
+EXPECTED_DIFF3=$(cat <<EOF
+diff --git a/file.txt b/file.txt
 --- a/file.txt
 +++ b/file.txt
 @@ -1,3 +1,3 @@
@@ -160,11 +163,11 @@ EXPECTED_DIFF3=$(cat <<EOF | grep -v '^index '
  Initial line 3
 EOF
 )
-ACTUAL_DIFF3=$(log_cmd git diff main...feature3 | grep -v '^index ')
+ACTUAL_DIFF3=$(log_cmd git diff main...feature3 | grep -v '^index')
 if [[ "$ACTUAL_DIFF3" == "$EXPECTED_DIFF3" ]]; then
-    echo "✅ Triple dot diff for feature3 shows expected changes (ignoring index line)"
+    echo "✅ Triple dot diff for feature3 shows expected changes"
 else
-    echo "❌ Triple dot diff for feature3 doesn't show expected changes (ignoring index line)"
+    echo "❌ Triple dot diff for feature3 doesn't show expected changes"
     echo "Expected:"
     echo "$EXPECTED_DIFF3"
     echo "Actual:"
@@ -174,39 +177,18 @@ fi
 
 
 # Test idempotence by running the update again
-# Note: The previous run checked out feature3, stay there for commit hash check
-FEATURE3_COMMIT_BEFORE=$(log_cmd git rev-parse HEAD)
-log_cmd git checkout feature2
-FEATURE2_COMMIT_BEFORE=$(log_cmd git rev-parse HEAD)
-
 echo -e "\nRunning update script again to test idempotence..."
+
+# Store current commit hashes
+FEATURE2_COMMIT_BEFORE=$(log_cmd git rev-parse feature2)
+FEATURE3_COMMIT_BEFORE=$(log_cmd git rev-parse feature3)
+
 # Run update script again with mocked push
-log_cmd \
-  env \
-  SQUASH_COMMIT=$SQUASH_COMMIT \
-  MERGED_BRANCH=feature1 \
-  TARGET_BRANCH=main \
-  GH="$SCRIPT_DIR/mock_gh.sh" \
-  GIT="$SCRIPT_DIR/mock_git.sh" \
-  $SCRIPT_DIR/../update-pr-stack.sh
-
-
-# Simulate the push again (should be no-op if idempotent)
-echo "Simulating push after idempotence run..."
-simulate_push feature2
-simulate_push feature3
-# Deletion should fail harmlessly if already deleted, or succeed if somehow recreated
-# We expect it to be deleted already, so this might show an error, which is fine.
-# Let's suppress the error for the delete attempt during idempotence check.
-log_cmd git update-ref -d "refs/remotes/origin/$MERGED_BRANCH" 2>/dev/null || true
-
+run_update_pr_stack
 
 # Check that no new commits were created
-cd "$TEST_REPO"
-log_cmd git checkout feature2
-FEATURE2_COMMIT_AFTER=$(log_cmd git rev-parse HEAD)
-log_cmd git checkout feature3
-FEATURE3_COMMIT_AFTER=$(log_cmd git rev-parse HEAD)
+FEATURE2_COMMIT_AFTER=$(log_cmd git rev-parse feature2)
+FEATURE3_COMMIT_AFTER=$(log_cmd git rev-parse feature3)
 
 if [[ "$FEATURE2_COMMIT_BEFORE" == "$FEATURE2_COMMIT_AFTER" ]]; then
     echo "✅ Idempotence test passed for feature2"

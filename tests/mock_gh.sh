@@ -16,13 +16,16 @@ if [[ "$1" == "pr" && "$2" == "list" ]]; then
     done
 
     if [[ "$base" == "main" ]]; then
-        echo "[]"  # No PRs target main in our test
+        : # No PRs target main in our test
     elif [[ "$base" == "feature1" ]]; then
-        echo '[{"headRefName": "feature2"}]'
+        echo 'feature2'
     elif [[ "$base" == "feature2" ]]; then
-        echo '[{"headRefName": "feature3"}]'
+        echo feature3
+    elif [[ "$base" == "feature3" ]]; then
+        :
     else
-        echo "[]"
+        echo "Unknown base branch: $@" >&2
+        exit 1
     fi
 elif [[ "$1" == "pr" && "$2" == "edit" ]]; then
     # Just log the edit command
