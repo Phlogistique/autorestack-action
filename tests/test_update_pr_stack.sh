@@ -15,16 +15,15 @@ git init
 git config user.email "test@example.com"
 git config user.name "Test User"
 
-# Create initial commit
+# Create and checkout the main branch *before* the first commit
+git checkout -b main
+
+# Create initial commit on main branch
 echo "Initial line 1" > file.txt
 echo "Initial line 2" >> file.txt
 echo "Initial line 3" >> file.txt
 git add file.txt
 git commit -m "Initial commit"
-
-# Create the main branch
-git branch main
-git checkout main
 
 # Create feature1 branch - Modify line 2
 git checkout -b feature1
