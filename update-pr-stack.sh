@@ -53,14 +53,13 @@ update_indirect_target() {
 ALL_CHILDREN=()
 update_branch_recursive() {
     local BRANCH="$1"
-    local BASE_BRANCH="$2"
 
     # Find and update branches based on this one
     CHILD_BRANCHES=$(log_cmd gh pr list --base "$BRANCH" --json headRefName --jq '.[].headRefName')
     ALL_CHILDREN+=($CHILD_BRANCHES)
     for CHILD_BRANCH in $CHILD_BRANCHES; do
         update_indirect_target "$CHILD_BRANCH" "$BRANCH"
-        update_branch_recursive "$CHILD_BRANCH" "$BRANCH"
+        update_branch_recursive "$CHILD_BRANCH"
     done
 }
 
@@ -77,7 +76,7 @@ main() {
 
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
         update_direct_target "$BRANCH" "$TARGET_BRANCH"
-        update_branch_recursive "$BRANCH" "$TARGET_BRANCH"
+        update_branch_recursive "$BRANCH"
     done
 
     # Update base branches for direct target PRs
