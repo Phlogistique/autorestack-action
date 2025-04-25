@@ -5,56 +5,61 @@ set -e
 # Get script directory (needed for static mock files)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Source command utils from the project root to get log_cmd early
+# Assuming command_utils.sh is one level up from the tests directory
+source "$SCRIPT_DIR/../command_utils.sh"
+
 # Create a temporary directory for the test repository
 TEST_REPO=$(mktemp -d)
 cd "$TEST_REPO"
 echo "Created test repo at $TEST_REPO"
 
 # Initialize a repo, set the initial branch name to main, and set up basic config
-git init -b main
-git config user.email "test@example.com"
-git config user.name "Test User"
+log_cmd git init -b main
+log_cmd git config user.email "test@example.com"
+log_cmd git config user.name "Test User"
 
 # Create initial commit on main branch
 echo "Initial line 1" > file.txt
 echo "Initial line 2" >> file.txt
 echo "Initial line 3" >> file.txt
-git add file.txt
-git commit -m "Initial commit"
+log_cmd git add file.txt
+log_cmd git commit -m "Initial commit"
 
 # Create feature1 branch - Modify line 2
-git checkout -b feature1
+log_cmd git checkout -b feature1
 sed -i '2s/.*/Feature 1 content line 2/' file.txt # Edit line 2
-git add file.txt
-git commit -m "Add feature 1"
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 1"
 
 # Make a note of the commit we'll squash/cherry-pick
-FEATURE1_COMMIT=$(git rev-parse HEAD)
+FEATURE1_COMMIT=$(log_cmd git rev-parse HEAD)
 
 # Create feature2 branch based on feature1 - Modify line 2
-git checkout -b feature2
+log_cmd git checkout -b feature2
 sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2
-git add file.txt
-git commit -m "Add feature 2"
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 2"
 
 # Create feature3 branch based on feature2 - Modify line 2
-git checkout -b feature3
+log_cmd git checkout -b feature3
 sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2
-git add file.txt
-git commit -m "Add feature 3"
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 3"
 
 # Simulate a squash merge of feature1 into main by cherry-picking
-git checkout main
-git cherry-pick "$FEATURE1_COMMIT" # Apply the changes from feature1's commit
+log_cmd git checkout main
+log_cmd git cherry-pick "$FEATURE1_COMMIT" # Apply the changes from feature1's commit
 # The cherry-pick creates a *new* commit on main, simulating the squash merge result
-SQUASH_COMMIT=$(git rev-parse HEAD) # Get the hash of the new commit on main
+SQUASH_COMMIT=$(log_cmd git rev-parse HEAD) # Get the hash of the new commit on main
 
 echo "Simulated Squash commit (via cherry-pick): $SQUASH_COMMIT"
 
 # Copy the necessary scripts to the test repo
+# The main script needs command_utils.sh in its directory
 mkdir -p scripts
-cp /home/noe/work/test-stack-3/test-stack/update-pr-stack.sh scripts/
-cp /home/noe/work/test-stack-3/test-stack/command_utils.sh scripts/
+cp "$SCRIPT_DIR/../update-pr-stack.sh" scripts/
+cp "$SCRIPT_DIR/../command_utils.sh" scripts/
 
 # Run the update-pr-stack.sh script with our mocked gh command
 cd scripts
@@ -64,45 +69,45 @@ export TARGET_BRANCH=main
 export GH="$SCRIPT_DIR/mock_gh.sh"
 
 echo "Running update-pr-stack.sh..."
+# The update script sources command_utils.sh itself
 bash ./update-pr-stack.sh
 
 # Verify the results
 cd "$TEST_REPO"
 
 # Test if the squash commit is incorporated into feature2
-git checkout feature2
-if git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
+log_cmd git checkout feature2
+if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
     echo "✅ feature2 includes the squash commit"
 else
     echo "❌ feature2 does not include the squash commit"
-    git log --graph --oneline --all
+    log_cmd git log --graph --oneline --all
     exit 1
 fi
 
 # Test if the squash commit is incorporated into feature3
-git checkout feature3
-if git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
+log_cmd git checkout feature3
+if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
     echo "✅ feature3 includes the squash commit"
 else
     echo "❌ feature3 does not include the squash commit"
-    git log --graph --oneline --all
+    log_cmd git log --graph --oneline --all
     exit 1
 fi
 
 # Show the contents of feature2 and feature3 to verify they contain all changes
 echo -e "\nContent of feature2 branch:"
-git checkout feature2
+log_cmd git checkout feature2
 cat file.txt
 
 echo -e "\nContent of feature3 branch:"
-git checkout feature3
+log_cmd git checkout feature3
 cat file.txt
 
 # Test triple dot diff on feature2
-git checkout feature2
+log_cmd git checkout feature2
 echo -e "\nDiff between main and feature2:"
-git diff main...feature2
-DIFF_COUNT=$(git diff main...feature2 | grep -c "^[+-][^+-]")
+log_cmd git diff main...feature2
 # After rebase, the diff should only contain the changes unique to feature2
 # In this conflict scenario, feature2's change should overwrite feature1's change
 EXPECTED_DIFF2=$(cat <<EOF
@@ -115,7 +120,7 @@ EXPECTED_DIFF2=$(cat <<EOF
  Initial line 3
 EOF
 )
-ACTUAL_DIFF2=$(git diff main...feature2)
+ACTUAL_DIFF2=$(log_cmd git diff main...feature2)
 if [[ "$ACTUAL_DIFF2" == "$EXPECTED_DIFF2" ]]; then
     echo "✅ Triple dot diff for feature2 shows expected changes"
 else
@@ -129,9 +134,9 @@ fi
 
 
 # Test triple dot diff on feature3
-git checkout feature3
+log_cmd git checkout feature3
 echo -e "\nDiff between main and feature3:"
-git diff main...feature3
+log_cmd git diff main...feature3
 # After rebase, the diff should only contain the changes unique to feature3 relative to main
 EXPECTED_DIFF3=$(cat <<EOF
 --- a/file.txt
@@ -143,7 +148,7 @@ EXPECTED_DIFF3=$(cat <<EOF
  Initial line 3
 EOF
 )
-ACTUAL_DIFF3=$(git diff main...feature3)
+ACTUAL_DIFF3=$(log_cmd git diff main...feature3)
 if [[ "$ACTUAL_DIFF3" == "$EXPECTED_DIFF3" ]]; then
     echo "✅ Triple dot diff for feature3 shows expected changes"
 else
@@ -162,10 +167,10 @@ echo -e "\nRunning update script again to test idempotence..."
 
 # Store current commit hashes
 cd "$TEST_REPO"
-git checkout feature2
-FEATURE2_COMMIT_BEFORE=$(git rev-parse HEAD)
-git checkout feature3
-FEATURE3_COMMIT_BEFORE=$(git rev-parse HEAD)
+log_cmd git checkout feature2
+FEATURE2_COMMIT_BEFORE=$(log_cmd git rev-parse HEAD)
+log_cmd git checkout feature3
+FEATURE3_COMMIT_BEFORE=$(log_cmd git rev-parse HEAD)
 
 # Run update script again
 cd "$TEST_REPO/scripts"
@@ -173,16 +178,16 @@ bash ./update-pr-stack.sh
 
 # Check that no new commits were created
 cd "$TEST_REPO"
-git checkout feature2
-FEATURE2_COMMIT_AFTER=$(git rev-parse HEAD)
-git checkout feature3
-FEATURE3_COMMIT_AFTER=$(git rev-parse HEAD)
+log_cmd git checkout feature2
+FEATURE2_COMMIT_AFTER=$(log_cmd git rev-parse HEAD)
+log_cmd git checkout feature3
+FEATURE3_COMMIT_AFTER=$(log_cmd git rev-parse HEAD)
 
 if [[ "$FEATURE2_COMMIT_BEFORE" == "$FEATURE2_COMMIT_AFTER" ]]; then
     echo "✅ Idempotence test passed for feature2"
 else
     echo "❌ Idempotence test failed for feature2"
-    git log --graph --oneline --all
+    log_cmd git log --graph --oneline --all
     exit 1
 fi
 
@@ -190,7 +195,7 @@ if [[ "$FEATURE3_COMMIT_BEFORE" == "$FEATURE3_COMMIT_AFTER" ]]; then
     echo "✅ Idempotence test passed for feature3"
 else
     echo "❌ Idempotence test failed for feature3"
-    git log --graph --oneline --all
+    log_cmd git log --graph --oneline --all
     exit 1
 fi
 
