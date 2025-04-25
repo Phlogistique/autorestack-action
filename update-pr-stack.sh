@@ -11,6 +11,10 @@ set -ue  # Exit immediately if a command exits with a non-zero status.
 
 source ./command_utils.sh
 
+# Allow replacing git and gh
+[ -v GIT ] && git() { "$GIT" "$@"; }
+[ -v GH ] && gh() { "$GH" "$@"; }
+
 # Function to check if a required environment variable is set
 check_env_var() {
     if [ -z "${!1}" ]; then
