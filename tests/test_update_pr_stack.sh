@@ -26,31 +26,31 @@ git commit -m "Initial commit"
 git branch main
 git checkout main
 
-# Create feature1 branch
+# Create feature1 branch - Modify line 2
 git checkout -b feature1
-sed -i 's/Initial line 2/Feature 1 content line 2/' file.txt
+sed -i '2s/.*/Feature 1 content line 2/' file.txt # Edit line 2
 git add file.txt
 git commit -m "Add feature 1"
 
 # Make a note of the commit we'll squash
 FEATURE1_COMMIT=$(git rev-parse HEAD)
 
-# Create feature2 branch based on feature1
+# Create feature2 branch based on feature1 - Modify line 2
 git checkout -b feature2
-sed -i 's/Initial line 3/Feature 2 content line 3/' file.txt
+sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2
 git add file.txt
 git commit -m "Add feature 2"
 
-# Create feature3 branch based on feature2
+# Create feature3 branch based on feature2 - Modify line 2
 git checkout -b feature3
-sed -i 's/Initial line 1/Feature 3 content line 1/' file.txt
+sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2
 git add file.txt
 git commit -m "Add feature 3"
 
 # Simulate a squash merge of feature1 into main
 git checkout main
 echo "Initial line 1" > file.txt
-echo "Feature 1 content line 2" >> file.txt
+echo "Feature 1 content line 2" >> file.txt # Reflect feature1 change on line 2
 echo "Initial line 3" >> file.txt
 git add file.txt
 SQUASH_COMMIT=$(git commit -m "Squashed: Add feature 1" | grep -o '[a-f0-9]\{7,\}')
