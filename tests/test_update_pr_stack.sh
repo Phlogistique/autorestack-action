@@ -53,11 +53,8 @@ echo "Initial line 1" > file.txt
 echo "Feature 1 content line 2" >> file.txt # Reflect feature1 change on line 2
 echo "Initial line 3" >> file.txt
 git add file.txt
-SQUASH_COMMIT=$(git commit -m "Squashed: Add feature 1" | grep -o '[a-f0-9]\{7,\}')
-
-if [ -z "$SQUASH_COMMIT" ]; then
-    SQUASH_COMMIT=$(git rev-parse HEAD)
-fi
+git commit -m "Squashed: Add feature 1"
+SQUASH_COMMIT=$(git rev-parse HEAD) # Get the hash of the squash commit
 
 echo "Squash commit: $SQUASH_COMMIT"
 
