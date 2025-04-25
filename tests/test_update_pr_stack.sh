@@ -73,56 +73,24 @@ simulate_push main # Update origin/main to include the squash commit
 
 echo "Simulated Squash commit (via cherry-pick): $SQUASH_COMMIT"
 
-# Copy the necessary scripts to the test repo
-# The main script needs command_utils.sh in its directory
-mkdir -p scripts
-cp "$SCRIPT_DIR/../update-pr-stack.sh" scripts/
-cp "$SCRIPT_DIR/../command_utils.sh" scripts/
-
-# Mock the git command specifically for the push operation
-mock_git() {
-    if [[ "$1" == "push" ]]; then
-        # Log the attempt but don't execute, preventing failure
-        printf "Executing (mocked):" >&2
-        printf " %q" "git" "$@" >&2
-        printf "\n" >&2
-    else
-        # Pass through any other git command to the real git
-        command git "$@"
-    fi
-}
-# Export the mock function so the script uses it
-export GIT=mock_git
-
 # Run the update-pr-stack.sh script with our mocked gh command
-cd scripts
-export SQUASH_COMMIT=$SQUASH_COMMIT
-export MERGED_BRANCH=feature1
-export TARGET_BRANCH=main
-export GH="$SCRIPT_DIR/mock_gh.sh"
 
 echo "Running update-pr-stack.sh..."
 # The update script sources command_utils.sh itself
-bash ./update-pr-stack.sh
-
-# Unset the mock git function
-unset GIT
-
-# Simulate the push that update-pr-stack.sh *would* have done
-cd "$TEST_REPO"
-echo "Simulating push of updated branches after script run..."
-# The script updates feature2 and feature3 locally before attempting push
-simulate_push feature2
-simulate_push feature3
-# The script deletes the remote merged branch
-simulate_delete_remote_branch feature1
+log_cmd \
+  env \
+  SQUASH_COMMIT=$SQUASH_COMMIT \
+  MERGED_BRANCH=feature1 \
+  TARGET_BRANCH=main \
+  GH="$SCRIPT_DIR/mock_gh.sh" \
+  GIT="$SCRIPT_DIR/mock_git.sh" \
+  $SCRIPT_DIR/../update-pr-stack.sh
 
 # Verify the results
 cd "$TEST_REPO"
 
 # Test if the squash commit is incorporated into feature2
-log_cmd git checkout feature2
-if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
+if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" feature2; then
     echo "✅ feature2 includes the squash commit"
 else
     echo "❌ feature2 does not include the squash commit"
@@ -131,8 +99,7 @@ else
 fi
 
 # Test if the squash commit is incorporated into feature3
-log_cmd git checkout feature3
-if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" HEAD; then
+if log_cmd git merge-base --is-ancestor "$SQUASH_COMMIT" feature3; then
     echo "✅ feature3 includes the squash commit"
 else
     echo "❌ feature3 does not include the squash commit"
@@ -142,12 +109,10 @@ fi
 
 # Show the contents of feature2 and feature3 to verify they contain all changes
 echo -e "\nContent of feature2 branch:"
-log_cmd git checkout feature2
-cat file.txt
+log_cmd git show feature2:file.txt
 
 echo -e "\nContent of feature3 branch:"
-log_cmd git checkout feature3
-cat file.txt
+log_cmd git show feature3:file.txt
 
 # Test triple dot diff on feature2
 log_cmd git checkout feature2
