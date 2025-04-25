@@ -47,6 +47,8 @@ sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 3"
 
+log_cmd git log -p
+
 # Simulate a squash merge of feature1 into main by cherry-picking
 log_cmd git checkout main
 log_cmd git cherry-pick "$FEATURE1_COMMIT" # Apply the changes from feature1's commit
