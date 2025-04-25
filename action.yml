@@ -1,0 +1,29 @@
+name: 'Stacked PR Update Action'
+description: 'Automatically fixes stacked PRs after a base PR is squash-merged'
+author: 'GitHub Actions'
+
+inputs:
+  github-token:
+    description: 'GitHub token for API access'
+    required: true
+    default: ${{ github.token }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Update PR stack
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GIT_AUTHOR_NAME: github-actions
+        GIT_AUTHOR_EMAIL: github-actions@github.com
+        GIT_COMMITTER_NAME: github-actions
+        GIT_COMMITTER_EMAIL: github-actions@github.com
+        SQUASH_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
+        MERGED_BRANCH: ${{ github.event.pull_request.head.ref }}
+        TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
+      run: ${{ github.action_path }}/update-pr-stack.sh
+
+branding:
+  icon: 'git-pull-request'
+  color: 'blue'
