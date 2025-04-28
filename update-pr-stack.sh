@@ -29,8 +29,8 @@ skip_if_clean() {
     local BASE="$2"
     # If BASE is already an ancestor of BRANCH *and*
     # the squash commit is already in history, we're done.
-    git merge-base --is-ancestor "origin/$BASE" "$BRANCH" \
-        && git merge-base --is-ancestor "$SQUASH_COMMIT" "$BRANCH"
+    git merge-base --is-ancestor "origin/$BASE" "origin/$BRANCH" \
+        && git merge-base --is-ancestor "$SQUASH_COMMIT" "origin/$BRANCH"
 }
 
 update_direct_target() {
@@ -67,7 +67,7 @@ update_indirect_target() {
 
     echo "Updating indirect target $BRANCH (based on $BASE_BRANCH)"
     log_cmd git checkout "$BRANCH"
-    log_cmd git merge --no-edit "origin/$BASE_BRANCH"
+    log_cmd git merge --no-edit "$BASE_BRANCH"
 }
 
 ALL_CHILDREN=()
