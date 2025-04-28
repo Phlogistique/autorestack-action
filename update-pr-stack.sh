@@ -34,32 +34,14 @@ skip_if_clean() {
 }
 
 format_branch_list_for_text() {
-    case $# in
-        0)
-            echo ""
-            ;;
-        1)
-            echo "\`$1\`"
-            ;;
-        2)
-            echo "\`$1\` and \`$2\`"
-            ;;
-        *)
-            local result=""
-            local i=1
-            for arg in "$@"; do
-                if [ "$i" -eq "$#" ]; then
-                    result+=", and \`$arg\`"
-                elif [ "$i" -eq 1 ]; then
-                    result="\`$arg\`"
-                else
-                    result+=", \`$arg\`"
-                fi
-                ((i++))
-            done
-            echo "$result"
-            ;;
-    esac
+    for ((i=1; i<=$#; i++)); do
+        case $i in
+            1) format='`%s`';;
+            $#) format=', and `%s`';;
+            *) format=', `%s`';;
+        esac
+        printf "$format" "${!i}"
+    done
 }
 
 update_direct_target() {
@@ -78,28 +60,36 @@ update_direct_target() {
     log_cmd git update-ref BEFORE_MERGE HEAD
     if ! log_cmd git merge --no-edit "origin/$MERGED_BRANCH"; then
         CONFLICTS+=("origin/$MERGED_BRANCH")
+        git merge --abort
     fi
     if ! log_cmd git merge --no-edit "${SQUASH_COMMIT}~"; then
         CONFLICTS+=("${SQUASH_COMMIT}~")
+        git merge --abort
     fi
 
     if [[ "${#CONFLICTS[@]}" -gt 0 ]]; then
-        gh pr comment -F - <<EOF
-"### ⚠️ Automatic update blocked by merge conflicts
-I tried to merge \`$BASE\` into this branch while updating the PR stack and hit conflicts.
-
-#### How to resolve
-\`\`\`bash
-git fetch origin
-git switch $CHILD
-git merge $BASE          # reproduce the conflict locally
-# …fix files, add, commit…
-git push --force-with-lease
-\`\`\`
-
-Once you push, the bot will automatically resume the PR-stack update.
-"
-EOF
+        {
+            echo "### ⚠️ Automatic update blocked by merge conflicts"
+            echo
+            echo -n "I tried to merge "
+            format_branch_list_for_text "${CONFLICTS[@]}"
+            echo
+            echo "into this branch while updating the PR stack and hit conflicts."
+            echo "#### How to resolve"
+            echo '```bash'
+            echo "git fetch origin"
+            echo "git switch $CHILD"
+            for conflict in "${CONFLICTS[@]}"; do
+                echo "git merge $conflict"
+                echo "# ..."
+                echo "# fix conflicts, for instance with `git mergetool`"
+                echo "# ..."
+                echo "git commit"
+            done
+            echo "git push"
+            echo '```'
+        } | gh pr comment -F -
+        gh pr edit --add-label autorestack-needs-conflict-resolution
     else
         log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
         log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
