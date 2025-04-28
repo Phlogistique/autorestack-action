@@ -34,28 +34,32 @@ skip_if_clean() {
 }
 
 format_branch_list_for_text() {
-    local num_args=$#
-    if [ "$num_args" -eq 0 ]; then
-        echo ""
-    elif [ "$num_args" -eq 1 ]; then
-        echo "\`$1\`"
-    elif [ "$num_args" -eq 2 ]; then
-        echo "\`$1\` and \`$2\`"
-    else
-        local result=""
-        local i=1
-        for arg in "$@"; do
-            if [ "$i" -eq "$num_args" ]; then
-                result+=", and \`$arg\`"
-            elif [ "$i" -eq 1 ]; then
-                result="\`$arg\`"
-            else
-                result+=", \`$arg\`"
-            fi
-            ((i++))
-        done
-        echo "$result"
-    fi
+    case $# in
+        0)
+            echo ""
+            ;;
+        1)
+            echo "\`$1\`"
+            ;;
+        2)
+            echo "\`$1\` and \`$2\`"
+            ;;
+        *)
+            local result=""
+            local i=1
+            for arg in "$@"; do
+                if [ "$i" -eq "$#" ]; then
+                    result+=", and \`$arg\`"
+                elif [ "$i" -eq 1 ]; then
+                    result="\`$arg\`"
+                else
+                    result+=", \`$arg\`"
+                fi
+                ((i++))
+            done
+            echo "$result"
+            ;;
+    esac
 }
 
 update_direct_target() {
