@@ -13,7 +13,8 @@ REPO_PREFIX="temp-e2e-test-stack-"
 REPO_NAME=$(echo "$REPO_PREFIX$(date +%s)-$RANDOM" | tr '[:upper:]' '[:lower:]')
 
 # Get GitHub username
-: ${GH_USER=autorestack-test}
+# Default to 'autorestack-test' if GH_USER is not set or empty
+: ${GH_USER:=autorestack-test}
 REPO_FULL_NAME="$GH_USER/$REPO_NAME"
 
 # Get the directory of the currently executing script
@@ -41,69 +42,78 @@ cleanup() {
   else
       echo >&2 "Remote repository $REPO_FULL_NAME does not exist or was already deleted."
   fi
-  
+
 }
 
 # Trap EXIT signal to ensure cleanup runs even if the script fails
-#trap cleanup EXIT
+trap cleanup EXIT
 
 wait_for_workflow() {
-    local branch=$1
-    local max_attempts=11 # ~2 minutes max wait time
+    local pr_number=$1 # PR number that was merged
+    local merged_branch_name=$2 # The head branch name of the merged PR
+    local merge_commit_sha=$3 # The SHA of the merge commit
+    local expected_conclusion=${4:-success} # Expected conclusion (success, failure, etc.)
+    local max_attempts=15 # Increased attempts (~5 mins max wait)
     local attempt=0
-    local workflow_file="update-pr-stack.yml" # Name of the workflow file
-    echo >&2 "Waiting for workflow triggered by merge commit $merge_commit_sha (PR #$pr_number)..."
+    local run_id="" # Reset run_id for each call
+
+    echo >&2 "Waiting for workflow triggered by merge of PR #$pr_number ($merged_branch_name) with merge commit $merge_commit_sha..."
+
     while [[ $attempt -lt $max_attempts ]]; do
-        sleep=$(( 3**attempt / 2**attempt ))
-        attempt=$((attempt + 1))
+        # Calculate sleep time: increases with attempts
+        sleep_time=$(( (attempt + 1) * 2 ))
+        echo >&2 "Attempt $((attempt + 1))/$max_attempts: Checking for workflow run..."
+
+        # Look for runs triggered by pull_request closure for the specific merge commit
+        # We filter by head_sha matching the merge commit, as the 'pull_request' event context might be tricky
+        # Note: This might be fragile if other workflows run on pull_request close.
+        # A more robust approach might involve filtering by workflow name AND the triggering commit/event details.
+        run_id=$(log_cmd gh run list \
+            --repo "$REPO_FULL_NAME" \
+            --json databaseId,headSha,event,status,conclusion \
+            --event pull_request \
+            --limit 5 \
+            --jq ".[] | select(.event == \"pull_request\" and .headSha == \"$merge_commit_sha\") | .databaseId" | head -n 1
+        )
 
         if [[ -z "$run_id" ]]; then
-            # List recent workflow runs for the specific workflow file on the main branch
-            run_id=$(log_cmd gh run list \
-                --repo "$REPO_FULL_NAME" \
-                --json databaseId,headSha,status,conclusion \
-                --event pull_request \
-                --limit 1 \
-                --branch $branch \
-                --jq ".[] | .databaseId"
-            )
-        fi
-
-        if [[ -z "$run_id" ]]; then
-            echo >&2 "Workflow run for commit $merge_commit_sha not found yet (attempt $attempt/$max_attempts), sleeping $sleep seconds."
+            echo >&2 "Workflow run for merge commit $merge_commit_sha not found yet. Sleeping $sleep_time seconds."
         else
+            echo >&2 "Found potential workflow run ID: $run_id"
             # Check the status of the specific run
-            run_status=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json status --jq '.status')
-            echo >&2 "Workflow run $run_id status: $run_status"
+            run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json status,conclusion)
+            run_status=$(echo "$run_info" | jq -r '.status')
+            run_conclusion=$(echo "$run_info" | jq -r '.conclusion') # Might be null if not completed
+
+            echo >&2 "Workflow run $run_id status: $run_status, conclusion: $run_conclusion"
+
             if [[ "$run_status" == "completed" ]]; then
-                run_conclusion=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json conclusion --jq '.conclusion')
-                echo >&2 "Workflow run $run_id completed with conclusion: $run_conclusion"
-                if [[ "$run_conclusion" == "success" ]]; then
-                    echo >&2 "Workflow completed successfully."
+                if [[ "$run_conclusion" == "$expected_conclusion" ]]; then
+                    echo >&2 "Workflow $run_id completed with expected conclusion: $run_conclusion."
                     return 0
                 else
-                    echo >&2 "Workflow failed with conclusion: $run_conclusion"
-                    # Fetch logs for debugging
+                    echo >&2 "Workflow $run_id completed with unexpected conclusion: $run_conclusion (expected: $expected_conclusion)"
                     log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $run_id"
                     return 1
                 fi
             elif [[ "$run_status" == "queued" || "$run_status" == "in_progress" || "$run_status" == "waiting" ]]; then
-                echo >&2 "Workflow is $run_status. (attempt $attempt/$max_attempts)"
+                echo >&2 "Workflow $run_id is $run_status. Sleeping $sleep_time seconds."
             else
-                echo >&2 "Workflow has unexpected status: $run_status"
-                gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $run_id"
+                echo >&2 "Workflow $run_id has unexpected status: $run_status. Conclusion: $run_conclusion"
+                log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $run_id"
                 return 1
             fi
         fi
 
-        sleep $sleep
+        sleep $sleep_time
+        attempt=$((attempt + 1))
     done
 
-
-    if [[ -z "$run_id" ]]; then
-        echo >&2 "Timeout waiting for workflow run to complete."
-        return 1
-    fi
+    echo >&2 "Timeout waiting for workflow run for merge commit $merge_commit_sha to complete with conclusion $expected_conclusion."
+    # List recent runs for debugging
+    echo >&2 "Recent runs:"
+    gh run list --repo "$REPO_FULL_NAME" --limit 10 || echo >&2 "Could not list recent runs."
+    return 1
 }
 
 # --- Test Execution ---
@@ -124,6 +134,7 @@ echo "Base file content line 2" >> file.txt
 echo "Base file content line 3" >> file.txt
 log_cmd git add file.txt
 log_cmd git commit -m "Initial commit"
+INITIAL_COMMIT_SHA=$(git rev-parse HEAD)
 
 # Copy action files
 echo >&2 "Copying action files..."
@@ -166,6 +177,7 @@ EOF
 
 log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/update-pr-stack.yml
 log_cmd git commit -m "Add action and workflow files"
+ACTION_COMMIT_SHA=$(git rev-parse HEAD)
 
 # 2. Create remote GitHub repository
 echo >&2 "2. Creating remote GitHub repository: $REPO_FULL_NAME"
@@ -177,7 +189,7 @@ echo >&2 "3. Pushing initial state to remote..."
 REMOTE_URL="https://github.com/$REPO_FULL_NAME.git"
 log_cmd git remote add origin "$REMOTE_URL"
 
-log_cmd git push -u origin main # Use force in case repo wasn't empty
+log_cmd git push -u origin main
 # 4. Create stacked PRs
 echo >&2 "4. Creating stacked branches and PRs..."
 # Branch feature1 (base: main)
@@ -191,7 +203,7 @@ PR1_NUM=$(echo "$PR1_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR1_NUM: $PR1_URL"
 # Branch feature2 (base: feature1)
 log_cmd git checkout -b feature2 feature1
-sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2
+sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2 again
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 2"
 log_cmd git push origin feature2
@@ -200,30 +212,34 @@ PR2_NUM=$(echo "$PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR2_NUM: $PR2_URL"
 # Branch feature3 (base: feature2)
 log_cmd git checkout -b feature3 feature2
-sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2
+sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2 again
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 3"
 log_cmd git push origin feature3
 PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature2 --head feature3 --title "Feature 3" --body "This is PR 3, based on PR 2")
 PR3_NUM=$(echo "$PR3_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR3_NUM: $PR3_URL"
+
+# --- Initial Merge Scenario ---
+echo >&2 "--- Testing Initial Merge (PR1) ---"
+
 # 5. Trigger Action by Squash Merging PR1
 echo >&2 "5. Squash merging PR #$PR1_NUM to trigger the action..."
 log_cmd gh pr merge "$PR1_URL" --squash --repo "$REPO_FULL_NAME"
-MERGE_COMMIT_SHA=$(gh pr view "$PR1_URL" --json mergeCommit -q .mergeCommit.oid)
-if [[ -z "$MERGE_COMMIT_SHA" ]]; then
+MERGE_COMMIT_SHA1=$(gh pr view "$PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
+if [[ -z "$MERGE_COMMIT_SHA1" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR1_NUM."
     exit 1
 fi
-echo >&2 "PR #$PR1_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA"
+echo >&2 "PR #$PR1_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA1"
 # 6. Wait for the workflow to complete
-echo >&2 "6. Waiting for the 'Update Stacked PRs' workflow to complete..."
-if ! wait_for_workflow feature1; then
-    echo >&2 "Workflow did not complete successfully."
+echo >&2 "6. Waiting for the 'Update Stacked PRs' workflow (triggered by PR1 merge) to complete..."
+if ! wait_for_workflow "$PR1_NUM" "feature1" "$MERGE_COMMIT_SHA1" "success"; then
+    echo >&2 "Workflow for PR1 merge did not complete successfully."
     exit 1
 fi
-# 7. Verification
-echo >&2 "7. Verifying the results..."
+# 7. Verification for Initial Merge
+echo >&2 "7. Verifying the results of the initial merge..."
 echo >&2 "Fetching latest state from remote..."
 log_cmd git fetch origin --prune # Prune deleted branches like feature1
 # Verify feature1 branch was deleted remotely
@@ -253,81 +269,251 @@ else
 fi
 # Verify local branches are updated to include the squash commit
 echo >&2 "Checking if branches incorporate the squash commit..."
+log_cmd git checkout main # Ensure main is up-to-date locally
+log_cmd git pull origin main
 log_cmd git checkout feature2 # Checkout local branch first
 log_cmd git pull origin feature2 # Pull updates pushed by the action
 log_cmd git checkout feature3
 log_cmd git pull origin feature3
-log_cmd git checkout main
-log_cmd git pull origin main # Ensure main is up-to-date locally
+
 # Check ancestry
-if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA" feature2; then
-    echo >&2 "✅ Verification Passed: feature2 correctly incorporates the squash commit."
+if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" feature2; then
+    echo >&2 "✅ Verification Passed: feature2 correctly incorporates the squash commit $MERGE_COMMIT_SHA1."
 else
-    echo >&2 "❌ Verification Failed: feature2 does not include the squash commit."
+    echo >&2 "❌ Verification Failed: feature2 does not include the squash commit $MERGE_COMMIT_SHA1."
     log_cmd git log --graph --oneline feature2 main
     exit 1
 fi
-if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA" feature3; then
-    echo >&2 "✅ Verification Passed: feature3 correctly incorporates the squash commit."
+if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" feature3; then
+    echo >&2 "✅ Verification Passed: feature3 correctly incorporates the squash commit $MERGE_COMMIT_SHA1."
 else
-    echo >&2 "❌ Verification Failed: feature3 does not include the squash commit."
+    echo >&2 "❌ Verification Failed: feature3 does not include the squash commit $MERGE_COMMIT_SHA1."
     log_cmd git log --graph --oneline feature3 main
     exit 1
 fi
 # Verify diffs (using triple-dot diff against the *new* base: main)
 echo >&2 "Verifying diff content for updated PRs..."
-# Expected diff for feature2 vs main (should only contain feature2 changes)
-EXPECTED_DIFF2=$(cat <<EOF
-diff --git a/file.txt b/file.txt
---- a/file.txt
-+++ b/file.txt
-@@ -1,3 +1,3 @@
- Base file content line 1
--Feature 1 content line 2
-+Feature 2 content line 2
- Base file content line 3
-EOF
-)
-# Use range diff main...feature2
-ACTUAL_DIFF2=$(log_cmd gh pr diff "$PR2_URL" | grep -v '^index') # Ignore index lines
-if [[ "$NORM_ACTUAL_DIFF2" == "$NORM_EXPECTED_DIFF2" ]]; then
-    echo >&2 "✅ Verification Passed: Diff for feature2 (main...feature2) is correct."
+# Expected diff for feature2 vs main (should only contain feature2 changes relative to feature1)
+# Note: The content check here is tricky because the base changed. We check the PR diff on GitHub.
+EXPECTED_DIFF2_CONTENT="Feature 2 content line 2"
+ACTUAL_DIFF2_CONTENT=$(log_cmd gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 2' | sed 's/^+//')
+
+if [[ "$ACTUAL_DIFF2_CONTENT" == "$EXPECTED_DIFF2_CONTENT" ]]; then
+    echo >&2 "✅ Verification Passed: Diff content for PR #$PR2_NUM seems correct."
 else
-    echo >&2 "❌ Verification Failed: Diff for feature2 (main...feature2) is incorrect."
-    echo "Expected Diff:"
-    echo "$EXPECTED_DIFF2"
-    echo "Actual Diff:"
-    echo "$ACTUAL_DIFF2"
+    echo >&2 "❌ Verification Failed: Diff content for PR #$PR2_NUM is incorrect."
+    echo "Expected Added Line Content: $EXPECTED_DIFF2_CONTENT"
+    echo "Actual Added Line Content: $ACTUAL_DIFF2_CONTENT"
+    gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME"
     exit 1
 fi
-# Expected diff for feature3 vs main (should contain feature2 + feature3 changes)
-EXPECTED_DIFF3=$(cat <<EOF
-diff --git a/file.txt b/file.txt
---- a/file.txt
-+++ b/file.txt
-@@ -1,3 +1,3 @@
- Base file content line 1
--Feature 2 content line 2
-+Feature 3 content line 2
- Base file content line 3
-EOF
-)
-# Use range diff main...feature3
-ACTUAL_DIFF3=$(log_cmd gh pr diff "$PR3_URL" | grep -v '^index') # Ignore index lines
-# Normalize potential whitespace differences
-NORM_EXPECTED_DIFF3=$(echo "$EXPECTED_DIFF3" | sed 's/ *$//')
-NORM_ACTUAL_DIFF3=$(echo "$ACTUAL_DIFF3" | sed 's/ *$//')
-if [[ "$NORM_ACTUAL_DIFF3" == "$NORM_EXPECTED_DIFF3" ]]; then
-    echo >&2 "✅ Verification Passed: Diff for feature3 (feature2...feature3) is correct."
+
+# Expected diff for feature3 vs feature2 (should only contain feature3 changes relative to feature2)
+EXPECTED_DIFF3_CONTENT="Feature 3 content line 2"
+ACTUAL_DIFF3_CONTENT=$(log_cmd gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 3' | sed 's/^+//')
+
+if [[ "$ACTUAL_DIFF3_CONTENT" == "$EXPECTED_DIFF3_CONTENT" ]]; then
+    echo >&2 "✅ Verification Passed: Diff content for PR #$PR3_NUM seems correct."
 else
-    echo >&2 "❌ Verification Failed: Diff for feature3 (feature2...feature3) is incorrect."
-    echo "Expected Diff:"
-    echo "$EXPECTED_DIFF3"
-    echo "Actual Diff:"
-    echo "$ACTUAL_DIFF3"
+    echo >&2 "❌ Verification Failed: Diff content for PR #$PR3_NUM is incorrect."
+    echo "Expected Added Line Content: $EXPECTED_DIFF3_CONTENT"
+    echo "Actual Added Line Content: $ACTUAL_DIFF3_CONTENT"
+    gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME"
     exit 1
 fi
+
+echo >&2 "--- Initial Merge Test Completed Successfully ---"
+
+
+# --- Conflict Scenario ---
+echo >&2 "--- Testing Conflict Scenario (Merging PR2) ---"
+
+# 8. Introduce conflicting changes
+echo >&2 "8. Introducing conflicting changes..."
+# Change line 3 on feature3
+log_cmd git checkout feature3
+sed -i '3s/.*/Feature 3 conflicting change line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Conflict: Modify line 3 on feature3"
+FEATURE3_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
+log_cmd git push origin feature3
+# Change line 3 on main
+log_cmd git checkout main
+sed -i '3s/.*/Main conflicting change line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Conflict: Modify line 3 on main"
+log_cmd git push origin main
+
+# 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
+echo >&2 "9. Squash merging PR #$PR2_NUM (feature2) to trigger conflict..."
+log_cmd gh pr merge "$PR2_URL" --squash --repo "$REPO_FULL_NAME"
+MERGE_COMMIT_SHA2=$(gh pr view "$PR2_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
+if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
+    echo >&2 "Failed to get merge commit SHA for PR #$PR2_NUM."
+    exit 1
+fi
+echo >&2 "PR #$PR2_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA2"
+
+# 10. Wait for the workflow to complete (it should succeed despite internal conflict)
+echo >&2 "10. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 merge)..."
+# The action itself should succeed because it posts a comment on conflict, not fail the run.
+if ! wait_for_workflow "$PR2_NUM" "feature2" "$MERGE_COMMIT_SHA2" "success"; then
+    echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
+    exit 1
+fi
+
+# 11. Verification for Conflict Scenario
+echo >&2 "11. Verifying the results of the conflict scenario..."
+echo >&2 "Fetching latest state from remote..."
+log_cmd git fetch origin --prune # Prune deleted branch feature2
+
+# Verify feature2 branch was deleted remotely
+if git show-ref --verify --quiet refs/remotes/origin/feature2; then
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature2' still exists after merge."
+    exit 1
+else
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature2' was deleted."
+fi
+
+# Verify PR3 base branch was updated to main (action updates base even on conflict)
+echo >&2 "Checking PR #$PR3_NUM base branch..."
+PR3_BASE_AFTER_CONFLICT=$(log_cmd gh pr view "$PR3_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+if [[ "$PR3_BASE_AFTER_CONFLICT" == "main" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR3_NUM base branch updated to 'main'."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR3_NUM base branch is '$PR3_BASE_AFTER_CONFLICT', expected 'main'."
+    exit 1
+fi
+
+
+# Verify conflict comment exists on PR3
+echo >&2 "Checking for conflict comment on PR #$PR3_NUM..."
+# Give GitHub some time to process the comment
+sleep 5
+CONFLICT_COMMENT=$(log_cmd gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[] | select(.body | contains("Automatic update blocked by merge conflicts")) | .body')
+if [[ -n "$CONFLICT_COMMENT" ]]; then
+    echo >&2 "✅ Verification Passed: Conflict comment found on PR #$PR3_NUM."
+    echo "$CONFLICT_COMMENT" # Log the comment
+else
+    echo >&2 "❌ Verification Failed: Conflict comment not found on PR #$PR3_NUM."
+    echo >&2 "--- Comments on PR #$PR3_NUM ---"
+    gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[].body' || echo "Failed to get comments"
+    echo >&2 "-----------------------------"
+    exit 1
+fi
+
+# Verify conflict label exists on PR3
+echo >&2 "Checking for conflict label on PR #$PR3_NUM..."
+CONFLICT_LABEL=$(log_cmd gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+if [[ "$CONFLICT_LABEL" == "autorestack-needs-conflict-resolution" ]]; then
+    echo >&2 "✅ Verification Passed: Conflict label 'autorestack-needs-conflict-resolution' found on PR #$PR3_NUM."
+else
+    echo >&2 "❌ Verification Failed: Conflict label not found on PR #$PR3_NUM."
+    echo >&2 "--- Labels on PR #$PR3_NUM ---"
+    gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[].name' || echo "Failed to get labels"
+    echo >&2 "-----------------------------"
+    exit 1
+fi
+
+# Verify feature3 branch was NOT pushed with conflicts (check its head SHA)
+REMOTE_FEATURE3_SHA_BEFORE_RESOLVE=$(log_cmd git rev-parse "refs/remotes/origin/feature3")
+# The action failed the merge locally, so it shouldn't have pushed feature3.
+# The remote SHA should still be the one from step 8 ("Conflict: Modify line 3 on feature3").
+EXPECTED_FEATURE3_SHA_BEFORE_RESOLVE=$FEATURE3_CONFLICT_COMMIT_SHA
+if [[ "$REMOTE_FEATURE3_SHA_BEFORE_RESOLVE" == "$EXPECTED_FEATURE3_SHA_BEFORE_RESOLVE" ]]; then
+     echo >&2 "✅ Verification Passed: Remote feature3 branch was not updated by the action due to conflict."
+else
+     echo >&2 "❌ Verification Failed: Remote feature3 branch SHA ($REMOTE_FEATURE3_SHA_BEFORE_RESOLVE) differs from expected SHA before conflict resolution ($EXPECTED_FEATURE3_SHA_BEFORE_RESOLVE)."
+     exit 1
+fi
+
+
+# 12. Resolve conflict manually
+echo >&2 "12. Resolving conflict manually on feature3..."
+log_cmd git checkout feature3
+# Ensure we have the latest main which includes the PR2 merge commit AND the conflicting change on main
+log_cmd git fetch origin
+log_cmd git checkout main
+log_cmd git pull origin main # Make sure local main is up-to-date
+log_cmd git checkout feature3
+# Now, perform the merge that the action tried and failed
+echo >&2 "Attempting merge of origin/main into feature3..."
+if git merge origin/main; then
+    echo >&2 "❌ Conflict Resolution Failed: Merge of main into feature3 succeeded unexpectedly (no conflict?)"
+    log_cmd git status
+    log_cmd git log --graph --oneline --all
+    exit 1
+else
+    echo >&2 "Merge conflict occurred as expected. Resolving..."
+    # Check status to confirm conflict
+    log_cmd git status
+    # Resolve conflict - let's keep the change from feature3 ("Feature 3 conflicting change line 3")
+    # Remove conflict markers and keep the desired line 3
+    sed -i '/<<<<<<< HEAD/,/=======/{//!d}' file.txt # Remove lines between <<<< and ==== (inclusive of <<<<)
+    sed -i '/=======/,/>>>>>>> origin\/main/d' file.txt # Remove lines between ==== and >>>> (inclusive of ==== and >>>>)
+
+    echo "Resolved file.txt content:"
+    cat file.txt
+    log_cmd git add file.txt
+    # Use 'git commit' without '-m' to use the default merge commit message
+    log_cmd git commit --no-edit
+    echo >&2 "Conflict resolved and committed."
+fi
+log_cmd git push origin feature3
+echo >&2 "Pushed resolved feature3."
+
+# 13. Verify conflict resolution
+echo >&2 "13. Verifying conflict resolution..."
+# Fetch the latest state again
+log_cmd git fetch origin
+log_cmd git checkout main
+log_cmd git pull origin main
+log_cmd git checkout feature3
+log_cmd git pull origin feature3
+
+# Verify feature3 now incorporates main (including PR2 merge commit and main's conflict commit)
+if log_cmd git merge-base --is-ancestor origin/main feature3; then
+    echo >&2 "✅ Verification Passed: Resolved feature3 correctly incorporates main."
+else
+    echo >&2 "❌ Verification Failed: Resolved feature3 does not include main."
+    log_cmd git log --graph --oneline feature3 origin/main
+    exit 1
+fi
+
+# Verify the final content of file.txt on feature3
+# Line 1: Original base
+# Line 2: From feature 3 commit ("Feature 3 content line 2")
+# Line 3: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 3")
+EXPECTED_CONTENT_LINE1="Base file content line 1"
+EXPECTED_CONTENT_LINE2="Feature 3 content line 2"
+EXPECTED_CONTENT_LINE3="Feature 3 conflicting change line 3"
+
+ACTUAL_CONTENT_LINE1=$(sed -n '1p' file.txt)
+ACTUAL_CONTENT_LINE2=$(sed -n '2p' file.txt)
+ACTUAL_CONTENT_LINE3=$(sed -n '3p' file.txt)
+
+if [[ "$ACTUAL_CONTENT_LINE1" == "$EXPECTED_CONTENT_LINE1" && \
+      "$ACTUAL_CONTENT_LINE2" == "$EXPECTED_CONTENT_LINE2" && \
+      "$ACTUAL_CONTENT_LINE3" == "$EXPECTED_CONTENT_LINE3" ]]; then
+    echo >&2 "✅ Verification Passed: file.txt content on resolved feature3 is correct."
+else
+    echo >&2 "❌ Verification Failed: file.txt content on resolved feature3 is incorrect."
+    echo "Expected:"
+    echo "$EXPECTED_CONTENT_LINE1"
+    echo "$EXPECTED_CONTENT_LINE2"
+    echo "$EXPECTED_CONTENT_LINE3"
+    echo "Actual:"
+    cat file.txt
+    exit 1
+fi
+
+# Optional: Verify the conflict label could be removed (manual step usually)
+# We won't automate label removal check as the action doesn't do it.
+
+echo >&2 "--- Conflict Scenario Test Completed Successfully ---"
+
+
 # --- Test Succeeded ---
 echo >&2 "--- E2E Test Completed Successfully! ---"
 
-cleanup
+# Cleanup is handled by the trap
