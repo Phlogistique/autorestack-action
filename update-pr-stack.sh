@@ -33,6 +33,9 @@ skip_if_clean() {
         && git merge-base --is-ancestor "$SQUASH_COMMIT" "origin/$BRANCH"
 }
 
+format_branch_list_for_text() {
+}
+
 update_direct_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
@@ -45,15 +48,39 @@ update_direct_target() {
     echo "Updating direct target $BRANCH (from $MERGED_BRANCH to $BASE_BRANCH)"
     log_cmd git checkout "$BRANCH"
 
+    CONFLICTS=()
     log_cmd git update-ref BEFORE_MERGE HEAD
-    log_cmd git merge --no-edit "origin/$MERGED_BRANCH"
-    log_cmd git merge --no-edit "${SQUASH_COMMIT}~"
-    log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
+    if ! log_cmd git merge --no-edit "origin/$MERGED_BRANCH"; then
+        CONFLICTS+=("origin/$MERGED_BRANCH")
+    fi
+    if ! log_cmd git merge --no-edit "${SQUASH_COMMIT}~"; then
+        CONFLICTS+=("${SQUASH_COMMIT}~")
+    fi
 
-    log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
-    COMMIT_MSG="Merge updates from $BASE_BRANCH and squash commit"
-    CUSTOM_COMMIT=$(log_cmd git commit-tree MERGE_RESULT -p BEFORE_MERGE -p "origin/$MERGED_BRANCH" -p SQUASH_COMMIT -m "$COMMIT_MSG")
-    log_cmd git reset --hard "$CUSTOM_COMMIT"
+    if [[ "${#CONFLICTS[@]}" -gt 0 ]]; then
+        gh pr comment -F - <<EOF
+"### ⚠️ Automatic update blocked by merge conflicts
+I tried to merge \`$BASE\` into this branch while updating the PR stack and hit conflicts.
+
+#### How to resolve
+\`\`\`bash
+git fetch origin
+git switch $CHILD
+git merge $BASE          # reproduce the conflict locally
+# …fix files, add, commit…
+git push --force-with-lease
+\`\`\`
+
+Once you push, the bot will automatically resume the PR-stack update.
+"
+EOF
+    else
+        log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
+        log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
+        COMMIT_MSG="Merge updates from $BASE_BRANCH and squash commit"
+        CUSTOM_COMMIT=$(log_cmd git commit-tree MERGE_RESULT -p BEFORE_MERGE -p "origin/$MERGED_BRANCH" -p SQUASH_COMMIT -m "$COMMIT_MSG")
+        log_cmd git reset --hard "$CUSTOM_COMMIT"
+    fi
 }
 
 update_indirect_target() {
