@@ -25,7 +25,7 @@ check_env_var() {
 }
 
 skip_if_clean() {
-    local BRANCH="$1" 
+    local BRANCH="$1"
     local BASE="$2"
     # If BASE is already an ancestor of BRANCH *and*
     # the squash commit is already in history, we're done.
@@ -34,6 +34,28 @@ skip_if_clean() {
 }
 
 format_branch_list_for_text() {
+    local num_args=$#
+    if [ "$num_args" -eq 0 ]; then
+        echo ""
+    elif [ "$num_args" -eq 1 ]; then
+        echo "\`$1\`"
+    elif [ "$num_args" -eq 2 ]; then
+        echo "\`$1\` and \`$2\`"
+    else
+        local result=""
+        local i=1
+        for arg in "$@"; do
+            if [ "$i" -eq "$num_args" ]; then
+                result+=", and \`$arg\`"
+            elif [ "$i" -eq 1 ]; then
+                result="\`$arg\`"
+            else
+                result+=", \`$arg\`"
+            fi
+            ((i++))
+        done
+        echo "$result"
+    fi
 }
 
 update_direct_target() {
