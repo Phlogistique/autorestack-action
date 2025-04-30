@@ -24,6 +24,9 @@ PROJECT_ROOT="$SCRIPT_DIR/.."
 # Source command utils for logging
 source "$PROJECT_ROOT/command_utils.sh"
 
+# Workflow file name
+WORKFLOW_FILE="update-pr-stack.yml"
+
 # --- Helper Functions ---
 cleanup() {
   echo >&2 "--- Cleaning up ---"
@@ -50,69 +53,109 @@ trap cleanup EXIT
 
 wait_for_workflow() {
     local pr_number=$1 # PR number that was merged
-    local merged_branch_name=$2 # The head branch name of the merged PR
+    local merged_branch_name=$2 # The head branch name of the merged PR (unused now, but kept for context)
     local merge_commit_sha=$3 # The SHA of the merge commit
     local expected_conclusion=${4:-success} # Expected conclusion (success, failure, etc.)
-    local max_attempts=15 # Increased attempts (~5 mins max wait)
+    local max_attempts=20 # Increased attempts (~7 mins max wait)
     local attempt=0
-    local run_id="" # Reset run_id for each call
+    local target_run_id=""
 
-    echo >&2 "Waiting for workflow triggered by merge of PR #$pr_number ($merged_branch_name) with merge commit $merge_commit_sha..."
+    echo >&2 "Waiting for workflow '$WORKFLOW_FILE' triggered by merge of PR #$pr_number (merge commit $merge_commit_sha)..."
 
     while [[ $attempt -lt $max_attempts ]]; do
         # Calculate sleep time: increases with attempts
         sleep_time=$(( (attempt + 1) * 2 ))
         echo >&2 "Attempt $((attempt + 1))/$max_attempts: Checking for workflow run..."
 
-        # Look for runs triggered by pull_request closure for the specific merge commit
-        # We filter by head_sha matching the merge commit, as the 'pull_request' event context might be tricky
-        # Note: This might be fragile if other workflows run on pull_request close.
-        # A more robust approach might involve filtering by workflow name AND the triggering commit/event details.
-        run_id=$(log_cmd gh run list \
-            --repo "$REPO_FULL_NAME" \
-            --json databaseId,headSha,event,status,conclusion \
-            --event pull_request \
-            --limit 5 \
-            --jq ".[] | select(.event == \"pull_request\" and .headSha == \"$merge_commit_sha\") | .databaseId" | head -n 1
-        )
+        # If we haven't found the target run ID yet, search for it
+        if [[ -z "$target_run_id" ]]; then
+            echo >&2 "Searching for the specific workflow run..."
+            # List recent runs for the specific workflow triggered by pull_request event
+            candidate_run_ids=$(log_cmd gh run list \
+                --repo "$REPO_FULL_NAME" \
+                --workflow "$WORKFLOW_FILE" \
+                --event pull_request \
+                --limit 10 \
+                --json databaseId --jq '.[].databaseId' || echo "") # Get IDs, handle potential errors
 
-        if [[ -z "$run_id" ]]; then
-            echo >&2 "Workflow run for merge commit $merge_commit_sha not found yet. Sleeping $sleep_time seconds."
-        else
-            echo >&2 "Found potential workflow run ID: $run_id"
-            # Check the status of the specific run
-            run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json status,conclusion)
-            run_status=$(echo "$run_info" | jq -r '.status')
-            run_conclusion=$(echo "$run_info" | jq -r '.conclusion') # Might be null if not completed
+            if [[ -z "$candidate_run_ids" ]]; then
+                echo >&2 "No recent '$WORKFLOW_FILE' runs found for 'pull_request' event. Sleeping $sleep_time seconds."
+                sleep $sleep_time
+                attempt=$((attempt + 1))
+                continue # Go to next attempt
+            fi
 
-            echo >&2 "Workflow run $run_id status: $run_status, conclusion: $run_conclusion"
+            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking payloads..."
+            for run_id in $candidate_run_ids; do
+                echo >&2 "Checking candidate run ID: $run_id"
+                run_payload_json=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json eventPayload || echo "{}") # Fetch payload, default to empty JSON on error
 
-            if [[ "$run_status" == "completed" ]]; then
-                if [[ "$run_conclusion" == "$expected_conclusion" ]]; then
-                    echo >&2 "Workflow $run_id completed with expected conclusion: $run_conclusion."
-                    return 0
+                # Check if the payload matches our merged PR
+                payload_action=$(echo "$run_payload_json" | jq -r '.eventPayload.action // ""')
+                payload_merged=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merged // ""')
+                payload_pr_num=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.number // ""')
+                payload_merge_sha=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merge_commit_sha // ""')
+
+                # Debugging output
+                # echo >&2 "  Payload Action: $payload_action"
+                # echo >&2 "  Payload Merged: $payload_merged"
+                # echo >&2 "  Payload PR Num: $payload_pr_num"
+                # echo >&2 "  Payload Merge SHA: $payload_merge_sha"
+
+                if [[ "$payload_action" == "closed" && \
+                      "$payload_merged" == "true" && \
+                      "$payload_pr_num" == "$pr_number" && \
+                      "$payload_merge_sha" == "$merge_commit_sha" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id"
+                    target_run_id="$run_id"
+                    break # Found the run, exit the inner loop
                 else
-                    echo >&2 "Workflow $run_id completed with unexpected conclusion: $run_conclusion (expected: $expected_conclusion)"
-                    log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $run_id"
-                    return 1
+                     echo >&2 "Run $run_id does not match the merge event criteria."
                 fi
-            elif [[ "$run_status" == "queued" || "$run_status" == "in_progress" || "$run_status" == "waiting" ]]; then
-                echo >&2 "Workflow $run_id is $run_status. Sleeping $sleep_time seconds."
+            done
+        fi
+
+        # If we still haven't found the run ID after checking candidates, wait and retry listing
+        if [[ -z "$target_run_id" ]]; then
+            echo >&2 "Target workflow run not found among recent runs. Sleeping $sleep_time seconds."
+            sleep $sleep_time
+            attempt=$((attempt + 1))
+            continue # Go to next attempt
+        fi
+
+        # --- Monitor the identified target run ---
+        echo >&2 "Monitoring workflow run ID: $target_run_id"
+        run_info=$(log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --json status,conclusion)
+        run_status=$(echo "$run_info" | jq -r '.status')
+        run_conclusion=$(echo "$run_info" | jq -r '.conclusion') # Might be null if not completed
+
+        echo >&2 "Workflow run $target_run_id status: $run_status, conclusion: $run_conclusion"
+
+        if [[ "$run_status" == "completed" ]]; then
+            if [[ "$run_conclusion" == "$expected_conclusion" ]]; then
+                echo >&2 "Workflow $target_run_id completed with expected conclusion: $run_conclusion."
+                return 0
             else
-                echo >&2 "Workflow $run_id has unexpected status: $run_status. Conclusion: $run_conclusion"
-                log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $run_id"
+                echo >&2 "Workflow $target_run_id completed with unexpected conclusion: $run_conclusion (expected: $expected_conclusion)"
+                log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $target_run_id"
                 return 1
             fi
+        elif [[ "$run_status" == "queued" || "$run_status" == "in_progress" || "$run_status" == "waiting" ]]; then
+            echo >&2 "Workflow $target_run_id is $run_status. Sleeping $sleep_time seconds."
+        else
+            echo >&2 "Workflow $target_run_id has unexpected status: $run_status. Conclusion: $run_conclusion"
+            log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $target_run_id"
+            return 1
         fi
 
         sleep $sleep_time
         attempt=$((attempt + 1))
     done
 
-    echo >&2 "Timeout waiting for workflow run for merge commit $merge_commit_sha to complete with conclusion $expected_conclusion."
+    echo >&2 "Timeout waiting for workflow run triggered by merge of PR #$pr_number (merge commit $merge_commit_sha) to complete with conclusion $expected_conclusion."
     # List recent runs for debugging
-    echo >&2 "Recent runs:"
-    gh run list --repo "$REPO_FULL_NAME" --limit 10 || echo >&2 "Could not list recent runs."
+    echo >&2 "Recent runs for workflow '$WORKFLOW_FILE':"
+    gh run list --repo "$REPO_FULL_NAME" --workflow "$WORKFLOW_FILE" --limit 10 || echo >&2 "Could not list recent runs."
     return 1
 }
 
@@ -145,7 +188,7 @@ cp "$PROJECT_ROOT/command_utils.sh" .
 # Create workflow file pointing to the local action
 echo >&2 "Creating workflow file..."
 mkdir -p .github/workflows
-cat > .github/workflows/update-pr-stack.yml <<'EOF'
+cat > .github/workflows/"$WORKFLOW_FILE" <<EOF
 name: Update Stacked PRs on Squash Merge (E2E Test)
 on:
   pull_request:
@@ -167,15 +210,15 @@ jobs:
           # Fetch all history for all branches and tags
           fetch-depth: 0
           # Use a PAT token for checkout to allow pushing updates
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: \${{ secrets.GITHUB_TOKEN }}
       - name: Update PR stack
         # Use the action from the current repository checkout
         uses: ./
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: \${{ secrets.GITHUB_TOKEN }}
 EOF
 
-log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/update-pr-stack.yml
+log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
 ACTION_COMMIT_SHA=$(git rev-parse HEAD)
 
