@@ -30,7 +30,7 @@ skip_if_clean() {
     # If BASE is already an ancestor of BRANCH *and*
     # the squash commit is already in history, we're done.
     git merge-base --is-ancestor "origin/$BASE" "origin/$BRANCH" \
-        && git merge-base --is-ancestor "$SQUASH_COMMIT" "origin/$BRANCH"
+        && git merge-base --is-ancestor SQUASH_COMMIT "origin/$BRANCH"
 }
 
 format_branch_list_for_text() {
@@ -62,8 +62,8 @@ update_direct_target() {
         CONFLICTS+=("origin/$MERGED_BRANCH")
         git merge --abort
     fi
-    if ! log_cmd git merge --no-edit "${SQUASH_COMMIT}~"; then
-        CONFLICTS+=("${SQUASH_COMMIT}~")
+    if ! log_cmd git merge --no-edit SQUASH_COMMIT~; then
+        CONFLICTS+=( "$(git rev-parse SQUASH_COMMIT~)" )
         git merge --abort
     fi
 
@@ -75,6 +75,7 @@ update_direct_target() {
             format_branch_list_for_text "${CONFLICTS[@]}"
             echo
             echo "into this branch while updating the PR stack and hit conflicts."
+            echo
             echo "#### How to resolve"
             echo '```bash'
             echo "git fetch origin"
