@@ -88,9 +88,8 @@ setup_git_and_gh() {
     # Disable commit signing for tests
     git config --global commit.gpgsign false
 
-    # Setup gh authentication
-    export GITHUB_TOKEN="$(cat "$TOKEN_FILE")"
-    export GH_TOKEN="$GITHUB_TOKEN"
+    # Setup gh authentication (gh uses GH_TOKEN)
+    export GH_TOKEN="$(cat "$TOKEN_FILE")"
 
     log_info "Configuring gh auth..."
     gh auth setup-git
@@ -115,8 +114,7 @@ restore_git_config() {
 run_e2e_tests() {
     log_info "Running e2e tests..."
 
-    export GITHUB_TOKEN="$(cat "$TOKEN_FILE")"
-    export GH_TOKEN="$GITHUB_TOKEN"
+    # GH_TOKEN is already exported from setup_git_and_gh, no need to re-export
 
     # Run the tests with a timeout
     if timeout 480 bash "$PROJECT_ROOT/tests/test_e2e.sh"; then
