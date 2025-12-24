@@ -10,7 +10,7 @@ If you use squash & merge instead, your main branch history stays nice and clean
 
 ### The solution
 
-This action fixes that automatically. Install it, and the workflow of stacking + merge during dev + squash merge when landing just works.
+This action tries to fix that in a transparent way. Install it, and hopefully the workflow of stacking + merge during dev + squash merge when landing works.
 
 ---
 
@@ -51,12 +51,10 @@ jobs:
           fetch-depth: 0
 
       - name: Update PR stack
-        uses: username/test-stack@v1
+        uses: Phlogistique/autorestack-action@main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 ```
-
-Replace `username/test-stack@v1` with the actual repository reference.
 
 ### Notes
 
@@ -64,3 +62,8 @@ Replace `username/test-stack@v1` with the actual repository reference.
 * If a merge hits a conflict, you'll need to resolve it manually
 * Very large stacks might hit GitHub rate limits
 
+---
+
+### Credits
+
+Inspired by Graphite and Gerrit workflows but implemented with plain git + GitHub CLI.
