@@ -196,10 +196,15 @@ log_cmd git init -b main
 log_cmd git config user.email "test-e2e@example.com"
 log_cmd git config user.name "E2E Test Bot"
 
-# Create initial content
+# Create initial content with enough lines for context separation
+# (Git needs ~3 lines of context between changes to avoid treating them as overlapping hunks)
 echo "Base file content line 1" > file.txt
 echo "Base file content line 2" >> file.txt
 echo "Base file content line 3" >> file.txt
+echo "Base file content line 4" >> file.txt
+echo "Base file content line 5" >> file.txt
+echo "Base file content line 6" >> file.txt
+echo "Base file content line 7" >> file.txt
 log_cmd git add file.txt
 log_cmd git commit -m "Initial commit"
 INITIAL_COMMIT_SHA=$(git rev-parse HEAD)
@@ -398,18 +403,18 @@ echo >&2 "--- Testing Conflict Scenario (Merging PR2) ---"
 
 # 8. Introduce conflicting changes
 echo >&2 "8. Introducing conflicting changes..."
-# Change line 3 on feature3
+# Change line 7 on feature3 (far from line 2 to avoid adjacent-line conflicts)
 log_cmd git checkout feature3
-sed -i '3s/.*/Feature 3 conflicting change line 3/' file.txt
+sed -i '7s/.*/Feature 3 conflicting change line 7/' file.txt
 log_cmd git add file.txt
-log_cmd git commit -m "Conflict: Modify line 3 on feature3"
+log_cmd git commit -m "Conflict: Modify line 7 on feature3"
 FEATURE3_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
 log_cmd git push origin feature3
-# Change line 3 on main
+# Change line 7 on main differently - this will conflict when rebasing feature3 after PR2 merge
 log_cmd git checkout main
-sed -i '3s/.*/Main conflicting change line 3/' file.txt
+sed -i '7s/.*/Main conflicting change line 7/' file.txt
 log_cmd git add file.txt
-log_cmd git commit -m "Conflict: Modify line 3 on main"
+log_cmd git commit -m "Conflict: Modify line 7 on main"
 log_cmd git push origin main
 
 # 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
@@ -515,8 +520,8 @@ else
     echo >&2 "Merge conflict occurred as expected. Resolving..."
     # Check status to confirm conflict
     log_cmd git status
-    # Resolve conflict - let's keep the change from feature3 ("Feature 3 conflicting change line 3")
-    # Remove conflict markers and keep the desired line 3
+    # Resolve conflict - let's keep the change from feature3 ("Feature 3 conflicting change line 7")
+    # Remove conflict markers and keep the desired line 7
     sed -i '/<<<<<<< HEAD/,/=======/{//!d}' file.txt # Remove lines between <<<< and ==== (inclusive of <<<<)
     sed -i '/=======/,/>>>>>>> origin\/main/d' file.txt # Remove lines between ==== and >>>> (inclusive of ==== and >>>>)
 
@@ -551,25 +556,25 @@ fi
 # Verify the final content of file.txt on feature3
 # Line 1: Original base
 # Line 2: From feature 3 commit ("Feature 3 content line 2")
-# Line 3: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 3")
+# Line 7: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 7")
 EXPECTED_CONTENT_LINE1="Base file content line 1"
 EXPECTED_CONTENT_LINE2="Feature 3 content line 2"
-EXPECTED_CONTENT_LINE3="Feature 3 conflicting change line 3"
+EXPECTED_CONTENT_LINE7="Feature 3 conflicting change line 7"
 
 ACTUAL_CONTENT_LINE1=$(sed -n '1p' file.txt)
 ACTUAL_CONTENT_LINE2=$(sed -n '2p' file.txt)
-ACTUAL_CONTENT_LINE3=$(sed -n '3p' file.txt)
+ACTUAL_CONTENT_LINE7=$(sed -n '7p' file.txt)
 
 if [[ "$ACTUAL_CONTENT_LINE1" == "$EXPECTED_CONTENT_LINE1" && \
       "$ACTUAL_CONTENT_LINE2" == "$EXPECTED_CONTENT_LINE2" && \
-      "$ACTUAL_CONTENT_LINE3" == "$EXPECTED_CONTENT_LINE3" ]]; then
+      "$ACTUAL_CONTENT_LINE7" == "$EXPECTED_CONTENT_LINE7" ]]; then
     echo >&2 "✅ Verification Passed: file.txt content on resolved feature3 is correct."
 else
     echo >&2 "❌ Verification Failed: file.txt content on resolved feature3 is incorrect."
     echo "Expected:"
     echo "$EXPECTED_CONTENT_LINE1"
     echo "$EXPECTED_CONTENT_LINE2"
-    echo "$EXPECTED_CONTENT_LINE3"
+    echo "$EXPECTED_CONTENT_LINE7"
     echo "Actual:"
     cat file.txt
     exit 1

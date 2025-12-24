@@ -7,10 +7,22 @@
 # MERGED_BRANCH - The name of the branch that was merged and will be deleted
 # TARGET_BRANCH - The name of the branch that the PR was merged into
 
-set -ue  # Exit immediately if a command exits with a non-zero status.
+set -ueo pipefail  # Exit on error, undefined var, or pipeline failure
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/command_utils.sh"
+
+# Debug output
+echo "=== update-pr-stack.sh starting ===" >&2
+echo "SQUASH_COMMIT: $SQUASH_COMMIT" >&2
+echo "MERGED_BRANCH: $MERGED_BRANCH" >&2
+echo "TARGET_BRANCH: $TARGET_BRANCH" >&2
+echo "Current directory: $(pwd)" >&2
+echo "Git remotes:" >&2
+git remote -v >&2
+echo "Git branches:" >&2
+git branch -a >&2
+echo "==================================" >&2
 
 # Allow replacing git and gh
 [ -v GIT ] && git() { "$GIT" "$@"; }
@@ -60,11 +72,11 @@ update_direct_target() {
     log_cmd git update-ref BEFORE_MERGE HEAD
     if ! log_cmd git merge --no-edit "origin/$MERGED_BRANCH"; then
         CONFLICTS+=("origin/$MERGED_BRANCH")
-        git merge --abort
+        log_cmd git merge --abort
     fi
     if ! log_cmd git merge --no-edit SQUASH_COMMIT~; then
         CONFLICTS+=( "$(git rev-parse SQUASH_COMMIT~)" )
-        git merge --abort
+        log_cmd git merge --abort
     fi
 
     if [[ "${#CONFLICTS[@]}" -gt 0 ]]; then
@@ -79,7 +91,7 @@ update_direct_target() {
             echo "#### How to resolve"
             echo '```bash'
             echo "git fetch origin"
-            echo "git switch $CHILD"
+            echo "git switch $BRANCH"
             for conflict in "${CONFLICTS[@]}"; do
                 echo "git merge $conflict"
                 echo "# ..."
@@ -89,8 +101,8 @@ update_direct_target() {
             done
             echo "git push"
             echo '```'
-        } | gh pr comment -F -
-        gh pr edit --add-label autorestack-needs-conflict-resolution
+        } | log_cmd gh pr comment "$BRANCH" -F -
+        log_cmd gh pr edit "$BRANCH" --add-label autorestack-needs-conflict-resolution
     else
         log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
         log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
