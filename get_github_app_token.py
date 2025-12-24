@@ -1,4 +1,12 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.11"
+# dependencies = [
+#     "PyJWT",
+#     "requests",
+#     "cryptography",
+# ]
+# ///
 """
 GitHub App Token Generator
 
@@ -9,14 +17,14 @@ Environment variables required:
 - GH_APP_PRIVATE_KEY_PEM_B64: Base64-encoded private key
 
 Usage:
-    # Print token to stdout
-    python get_github_app_token.py
+    # Run with uv (automatically installs dependencies)
+    uv run get_github_app_token.py
 
     # Save to file
-    python get_github_app_token.py > token.txt
+    uv run get_github_app_token.py > token.txt
 
     # Use in shell
-    export GITHUB_TOKEN=$(python get_github_app_token.py)
+    export GITHUB_TOKEN=$(uv run get_github_app_token.py)
 """
 
 import base64
@@ -24,13 +32,8 @@ import os
 import sys
 import time
 
-try:
-    import jwt
-    import requests
-except ImportError:
-    print("Error: Missing required dependencies", file=sys.stderr)
-    print("Install with: pip install PyJWT requests cryptography", file=sys.stderr)
-    sys.exit(1)
+import jwt
+import requests
 
 
 def get_installation_token():
