@@ -116,17 +116,13 @@ run_e2e_tests() {
 
     # GH_TOKEN is already exported from setup_git_and_gh, no need to re-export
 
-    # Run the tests with a timeout
-    if timeout 480 bash "$PROJECT_ROOT/tests/test_e2e.sh"; then
+    # Run the tests (timeout should be handled externally)
+    if bash "$PROJECT_ROOT/tests/test_e2e.sh"; then
         log_info "✅ E2E tests completed successfully!"
         return 0
     else
         local exit_code=$?
-        if [[ $exit_code -eq 124 ]]; then
-            log_error "❌ E2E tests timed out after 8 minutes"
-        else
-            log_error "❌ E2E tests failed with exit code: $exit_code"
-        fi
+        log_error "❌ E2E tests failed with exit code: $exit_code"
         return $exit_code
     fi
 }
