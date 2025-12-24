@@ -116,28 +116,22 @@ wait_for_workflow() {
                 continue # Go to next attempt
             fi
 
-            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking payloads..."
+            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
             for run_id in $candidate_run_ids; do
                 echo >&2 "Checking candidate run ID: $run_id"
-                run_payload_json=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json eventPayload || echo "{}") # Fetch payload, default to empty JSON on error
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,headSha || echo "{}") # Fetch run info, default to empty JSON on error
 
-                # Check if the payload matches our merged PR
-                payload_action=$(echo "$run_payload_json" | jq -r '.eventPayload.action // ""')
-                payload_merged=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merged // ""')
-                payload_pr_num=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.number // ""')
-                payload_merge_sha=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merge_commit_sha // ""')
+                # Check if the run matches our merged branch
+                run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
+                run_head_sha=$(echo "$run_info" | jq -r '.headSha // ""')
 
-                # Debugging output
-                # echo >&2 "  Payload Action: $payload_action"
-                # echo >&2 "  Payload Merged: $payload_merged"
-                # echo >&2 "  Payload PR Num: $payload_pr_num"
-                # echo >&2 "  Payload Merge SHA: $payload_merge_sha"
+                echo >&2 "  Run head branch: $run_head_branch, head SHA: $run_head_sha"
+                echo >&2 "  Expected merged branch: $merged_branch_name, merge commit SHA: $merge_commit_sha"
 
-                if [[ "$payload_action" == "closed" && \
-                      "$payload_merged" == "true" && \
-                      "$payload_pr_num" == "$pr_number" && \
-                      "$payload_merge_sha" == "$merge_commit_sha" ]]; then
-                    echo >&2 "Found matching workflow run ID: $run_id"
+                # For pull_request events, the workflow runs on the PR's head branch
+                # Match by the head branch being the merged branch name
+                if [[ "$run_head_branch" == "$merged_branch_name" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (headBranch matches merged branch)"
                     target_run_id="$run_id"
                     break # Found the run, exit the inner loop
                 else
