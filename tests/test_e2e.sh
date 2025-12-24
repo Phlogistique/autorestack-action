@@ -51,8 +51,12 @@ cleanup() {
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
 
-# Merge a PR with retry logic to handle transient "not mergeable" errors
-# GitHub's mergeability computation can take a few seconds after base branch changes
+# Merge a PR with retry logic to handle transient "not mergeable" errors.
+# After pushing to a PR's base branch, GitHub's mergeability computation is async
+# and can take several seconds. During this time, merge attempts fail with
+# "Pull Request is not mergeable" even when there's no actual conflict.
+# See: https://github.com/cli/cli/issues/8092
+#      https://github.com/orgs/community/discussions/24462
 merge_pr_with_retry() {
     local pr_url=$1
     local max_attempts=5
