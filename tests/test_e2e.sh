@@ -299,10 +299,7 @@ echo >&2 "--- Testing Initial Merge (PR1) ---"
 
 # 5. Trigger Action by Squash Merging PR1
 echo >&2 "5. Squash merging PR #$PR1_NUM to trigger the action..."
-if ! merge_pr_with_retry "$PR1_URL"; then
-    echo >&2 "Failed to merge PR #$PR1_NUM."
-    exit 1
-fi
+merge_pr_with_retry "$PR1_URL"
 MERGE_COMMIT_SHA1=$(gh pr view "$PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA1" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR1_NUM."
@@ -423,10 +420,7 @@ log_cmd git push origin main
 
 # 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
 echo >&2 "9. Squash merging PR #$PR2_NUM (feature2) to trigger conflict..."
-if ! merge_pr_with_retry "$PR2_URL"; then
-    echo >&2 "Failed to merge PR #$PR2_NUM."
-    exit 1
-fi
+merge_pr_with_retry "$PR2_URL"
 MERGE_COMMIT_SHA2=$(gh pr view "$PR2_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR2_NUM."
