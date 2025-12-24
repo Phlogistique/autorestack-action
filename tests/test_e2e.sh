@@ -51,6 +51,37 @@ cleanup() {
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
 
+# Merge a PR with retry logic to handle transient "not mergeable" errors.
+# After pushing to a PR's base branch, GitHub's mergeability computation is async
+# and can take several seconds. During this time, merge attempts fail with
+# "Pull Request is not mergeable" even when there's no actual conflict.
+# See: https://github.com/cli/cli/issues/8092
+#      https://github.com/orgs/community/discussions/24462
+merge_pr_with_retry() {
+    local pr_url=$1
+    local max_attempts=5
+    local attempt=0
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+        echo >&2 "Merge attempt $attempt/$max_attempts for $pr_url..."
+
+        if log_cmd gh pr merge "$pr_url" --squash --repo "$REPO_FULL_NAME" 2>&1; then
+            echo >&2 "PR merged successfully on attempt $attempt."
+            return 0
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            local sleep_time=$((attempt * 2))
+            echo >&2 "Merge failed, retrying in ${sleep_time}s..."
+            sleep $sleep_time
+        fi
+    done
+
+    echo >&2 "Failed to merge PR after $max_attempts attempts."
+    return 1
+}
+
 wait_for_workflow() {
     local pr_number=$1 # PR number that was merged
     local merged_branch_name=$2 # The head branch name of the merged PR (unused now, but kept for context)
@@ -85,28 +116,22 @@ wait_for_workflow() {
                 continue # Go to next attempt
             fi
 
-            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking payloads..."
+            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
             for run_id in $candidate_run_ids; do
                 echo >&2 "Checking candidate run ID: $run_id"
-                run_payload_json=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json eventPayload || echo "{}") # Fetch payload, default to empty JSON on error
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,headSha || echo "{}") # Fetch run info, default to empty JSON on error
 
-                # Check if the payload matches our merged PR
-                payload_action=$(echo "$run_payload_json" | jq -r '.eventPayload.action // ""')
-                payload_merged=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merged // ""')
-                payload_pr_num=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.number // ""')
-                payload_merge_sha=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merge_commit_sha // ""')
+                # Check if the run matches our merged branch
+                run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
+                run_head_sha=$(echo "$run_info" | jq -r '.headSha // ""')
 
-                # Debugging output
-                # echo >&2 "  Payload Action: $payload_action"
-                # echo >&2 "  Payload Merged: $payload_merged"
-                # echo >&2 "  Payload PR Num: $payload_pr_num"
-                # echo >&2 "  Payload Merge SHA: $payload_merge_sha"
+                echo >&2 "  Run head branch: $run_head_branch, head SHA: $run_head_sha"
+                echo >&2 "  Expected merged branch: $merged_branch_name, merge commit SHA: $merge_commit_sha"
 
-                if [[ "$payload_action" == "closed" && \
-                      "$payload_merged" == "true" && \
-                      "$payload_pr_num" == "$pr_number" && \
-                      "$payload_merge_sha" == "$merge_commit_sha" ]]; then
-                    echo >&2 "Found matching workflow run ID: $run_id"
+                # For pull_request events, the workflow runs on the PR's head branch
+                # Match by the head branch being the merged branch name
+                if [[ "$run_head_branch" == "$merged_branch_name" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (headBranch matches merged branch)"
                     target_run_id="$run_id"
                     break # Found the run, exit the inner loop
                 else
@@ -268,7 +293,7 @@ echo >&2 "--- Testing Initial Merge (PR1) ---"
 
 # 5. Trigger Action by Squash Merging PR1
 echo >&2 "5. Squash merging PR #$PR1_NUM to trigger the action..."
-log_cmd gh pr merge "$PR1_URL" --squash --repo "$REPO_FULL_NAME"
+merge_pr_with_retry "$PR1_URL"
 MERGE_COMMIT_SHA1=$(gh pr view "$PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA1" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR1_NUM."
@@ -389,7 +414,7 @@ log_cmd git push origin main
 
 # 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
 echo >&2 "9. Squash merging PR #$PR2_NUM (feature2) to trigger conflict..."
-log_cmd gh pr merge "$PR2_URL" --squash --repo "$REPO_FULL_NAME"
+merge_pr_with_retry "$PR2_URL"
 MERGE_COMMIT_SHA2=$(gh pr view "$PR2_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR2_NUM."
