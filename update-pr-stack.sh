@@ -12,18 +12,6 @@ set -ueo pipefail  # Exit on error, undefined var, or pipeline failure
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/command_utils.sh"
 
-# Debug output
-echo "=== update-pr-stack.sh starting ===" >&2
-echo "SQUASH_COMMIT: $SQUASH_COMMIT" >&2
-echo "MERGED_BRANCH: $MERGED_BRANCH" >&2
-echo "TARGET_BRANCH: $TARGET_BRANCH" >&2
-echo "Current directory: $(pwd)" >&2
-echo "Git remotes:" >&2
-git remote -v >&2
-echo "Git branches:" >&2
-git branch -a >&2
-echo "==================================" >&2
-
 # Allow replacing git and gh
 [ -v GIT ] && git() { "$GIT" "$@"; }
 [ -v GH ] && gh() { "$GH" "$@"; }
@@ -102,6 +90,8 @@ update_direct_target() {
             echo "git push"
             echo '```'
         } | log_cmd gh pr comment "$BRANCH" -F -
+        # Create the label if it doesn't exist, then add it to the PR
+        gh label create autorestack-needs-conflict-resolution --description "PR needs manual conflict resolution" --color "d73a4a" 2>/dev/null || true
         log_cmd gh pr edit "$BRANCH" --add-label autorestack-needs-conflict-resolution
     else
         log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"

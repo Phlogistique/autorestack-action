@@ -29,6 +29,14 @@ WORKFLOW_FILE="update-pr-stack.yml"
 
 # --- Helper Functions ---
 cleanup() {
+  # If PRESERVE_ON_FAILURE is set and there was an error, skip cleanup
+  if [[ "${PRESERVE_ON_FAILURE:-}" == "1" ]] && [[ "${TEST_FAILED:-}" == "1" ]]; then
+    echo >&2 "--- Preserving repo for debugging (PRESERVE_ON_FAILURE=1) ---"
+    echo >&2 "Repo: $REPO_FULL_NAME"
+    echo >&2 "Local dir: $TEST_DIR"
+    return 0
+  fi
+
   echo >&2 "--- Cleaning up ---"
   if [[ -d "$TEST_DIR" ]]; then
     echo >&2 "Removing local test directory: $TEST_DIR"
@@ -50,6 +58,12 @@ cleanup() {
 
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
+
+# Wrapper to exit with failure and set flag for preservation
+fail_test() {
+  TEST_FAILED=1
+  exit 1
+}
 
 # Merge a PR with retry logic to handle transient "not mergeable" errors.
 # After pushing to a PR's base branch, GitHub's mergeability computation is async
@@ -432,7 +446,7 @@ echo >&2 "10. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 me
 # The action itself should succeed because it posts a comment on conflict, not fail the run.
 if ! wait_for_workflow "$PR2_NUM" "feature2" "$MERGE_COMMIT_SHA2" "success"; then
     echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
-    exit 1
+    fail_test
 fi
 
 # 11. Verification for Conflict Scenario
@@ -520,10 +534,20 @@ else
     echo >&2 "Merge conflict occurred as expected. Resolving..."
     # Check status to confirm conflict
     log_cmd git status
-    # Resolve conflict - let's keep the change from feature3 ("Feature 3 conflicting change line 7")
-    # Remove conflict markers and keep the desired line 7
-    sed -i '/<<<<<<< HEAD/,/=======/{//!d}' file.txt # Remove lines between <<<< and ==== (inclusive of <<<<)
-    sed -i '/=======/,/>>>>>>> origin\/main/d' file.txt # Remove lines between ==== and >>>> (inclusive of ==== and >>>>)
+    # Resolve conflict - keep feature3's version (ours) for line 7, take main's version for the rest
+    # Use git checkout --ours to keep our version of the conflicting file
+    log_cmd git checkout --ours file.txt
+    # But we need line 7 from feature3, and the rest from main after PR2 merge
+    # Actually, let's just manually construct the expected file
+    cat > file.txt << 'RESOLVED_EOF'
+Base file content line 1
+Feature 3 content line 2
+Base file content line 3
+Base file content line 4
+Base file content line 5
+Base file content line 6
+Feature 3 conflicting change line 7
+RESOLVED_EOF
 
     echo "Resolved file.txt content:"
     cat file.txt
