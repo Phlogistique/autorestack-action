@@ -85,28 +85,22 @@ wait_for_workflow() {
                 continue # Go to next attempt
             fi
 
-            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking payloads..."
+            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
             for run_id in $candidate_run_ids; do
                 echo >&2 "Checking candidate run ID: $run_id"
-                run_payload_json=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json eventPayload || echo "{}") # Fetch payload, default to empty JSON on error
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,headSha || echo "{}") # Fetch run info, default to empty JSON on error
 
-                # Check if the payload matches our merged PR
-                payload_action=$(echo "$run_payload_json" | jq -r '.eventPayload.action // ""')
-                payload_merged=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merged // ""')
-                payload_pr_num=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.number // ""')
-                payload_merge_sha=$(echo "$run_payload_json" | jq -r '.eventPayload.pull_request.merge_commit_sha // ""')
+                # Check if the run matches our merged branch
+                run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
+                run_head_sha=$(echo "$run_info" | jq -r '.headSha // ""')
 
-                # Debugging output
-                # echo >&2 "  Payload Action: $payload_action"
-                # echo >&2 "  Payload Merged: $payload_merged"
-                # echo >&2 "  Payload PR Num: $payload_pr_num"
-                # echo >&2 "  Payload Merge SHA: $payload_merge_sha"
+                echo >&2 "  Run head branch: $run_head_branch, head SHA: $run_head_sha"
+                echo >&2 "  Expected merged branch: $merged_branch_name, merge commit SHA: $merge_commit_sha"
 
-                if [[ "$payload_action" == "closed" && \
-                      "$payload_merged" == "true" && \
-                      "$payload_pr_num" == "$pr_number" && \
-                      "$payload_merge_sha" == "$merge_commit_sha" ]]; then
-                    echo >&2 "Found matching workflow run ID: $run_id"
+                # For pull_request events, the workflow runs on the PR's head branch
+                # Match by the head branch being the merged branch name
+                if [[ "$run_head_branch" == "$merged_branch_name" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (headBranch matches merged branch)"
                     target_run_id="$run_id"
                     break # Found the run, exit the inner loop
                 else
@@ -371,24 +365,36 @@ echo >&2 "--- Initial Merge Test Completed Successfully ---"
 # --- Conflict Scenario ---
 echo >&2 "--- Testing Conflict Scenario (Merging PR2) ---"
 
-# 8. Introduce conflicting changes
-echo >&2 "8. Introducing conflicting changes..."
-# Change line 3 on feature3
+# 8. Introduce conflicting change on main BEFORE merging PR2
+echo >&2 "8. Introducing conflicting change on main..."
+log_cmd git checkout main
+sed -i '3s/.*/Main conflicting change line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Conflict: Modify line 3 on main"
+MAIN_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
+log_cmd git push origin main
+
+# 9. Introduce conflicting change on feature3 (this will conflict when the action tries to update it)
+echo >&2 "9. Introducing conflicting change on feature3..."
 log_cmd git checkout feature3
 sed -i '3s/.*/Feature 3 conflicting change line 3/' file.txt
 log_cmd git add file.txt
 log_cmd git commit -m "Conflict: Modify line 3 on feature3"
 FEATURE3_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
 log_cmd git push origin feature3
-# Change line 3 on main
-log_cmd git checkout main
-sed -i '3s/.*/Main conflicting change line 3/' file.txt
-log_cmd git add file.txt
-log_cmd git commit -m "Conflict: Modify line 3 on main"
-log_cmd git push origin main
 
-# 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
-echo >&2 "9. Squash merging PR #$PR2_NUM (feature2) to trigger conflict..."
+# 10. Update PR2's branch to incorporate the new main commit
+echo >&2 "10. Updating PR #$PR2_NUM branch to incorporate latest main..."
+# This should succeed since feature2 doesn't modify line 3
+gh api -X PUT "/repos/$REPO_FULL_NAME/pulls/$PR2_NUM/update-branch" --silent || {
+    echo >&2 "Failed to update PR #$PR2_NUM branch"
+    exit 1
+}
+# Wait a moment for GitHub to process the update
+sleep 3
+
+# 11. Merge PR2 to trigger the action (which should encounter a conflict updating PR3)
+echo >&2 "11. Squash merging PR #$PR2_NUM (feature2) to trigger conflict scenario..."
 log_cmd gh pr merge "$PR2_URL" --squash --repo "$REPO_FULL_NAME"
 MERGE_COMMIT_SHA2=$(gh pr view "$PR2_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
@@ -397,16 +403,16 @@ if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
 fi
 echo >&2 "PR #$PR2_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA2"
 
-# 10. Wait for the workflow to complete (it should succeed despite internal conflict)
-echo >&2 "10. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 merge)..."
+# 12. Wait for the workflow to complete (it should succeed despite internal conflict)
+echo >&2 "12. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 merge)..."
 # The action itself should succeed because it posts a comment on conflict, not fail the run.
 if ! wait_for_workflow "$PR2_NUM" "feature2" "$MERGE_COMMIT_SHA2" "success"; then
     echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
     exit 1
 fi
 
-# 11. Verification for Conflict Scenario
-echo >&2 "11. Verifying the results of the conflict scenario..."
+# 13. Verification for Conflict Scenario
+echo >&2 "13. Verifying the results of the conflict scenario..."
 echo >&2 "Fetching latest state from remote..."
 log_cmd git fetch origin --prune # Prune deleted branch feature2
 
@@ -471,8 +477,8 @@ else
 fi
 
 
-# 12. Resolve conflict manually
-echo >&2 "12. Resolving conflict manually on feature3..."
+# 14. Resolve conflict manually
+echo >&2 "14. Resolving conflict manually on feature3..."
 log_cmd git checkout feature3
 # Ensure we have the latest main which includes the PR2 merge commit AND the conflicting change on main
 log_cmd git fetch origin
@@ -505,8 +511,8 @@ fi
 log_cmd git push origin feature3
 echo >&2 "Pushed resolved feature3."
 
-# 13. Verify conflict resolution
-echo >&2 "13. Verifying conflict resolution..."
+# 15. Verify conflict resolution
+echo >&2 "15. Verifying conflict resolution..."
 # Fetch the latest state again
 log_cmd git fetch origin
 log_cmd git checkout main
