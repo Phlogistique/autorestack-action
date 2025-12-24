@@ -6,22 +6,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$SCRIPT_DIR/.."
 TOKEN_FILE="/tmp/gh_token.txt"
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
 log_info() {
-    echo -e "${GREEN}[INFO]${NC} $1"
+    echo "[INFO] $1"
 }
 
 log_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
+    echo "[WARN] $1"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo "[ERROR] $1" >&2
 }
 
 # 1. Install gh CLI if not present
