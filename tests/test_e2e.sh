@@ -51,6 +51,33 @@ cleanup() {
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
 
+# Merge a PR with retry logic to handle transient "not mergeable" errors
+# GitHub's mergeability computation can take a few seconds after base branch changes
+merge_pr_with_retry() {
+    local pr_url=$1
+    local max_attempts=5
+    local attempt=0
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        attempt=$((attempt + 1))
+        echo >&2 "Merge attempt $attempt/$max_attempts for $pr_url..."
+
+        if log_cmd gh pr merge "$pr_url" --squash --repo "$REPO_FULL_NAME" 2>&1; then
+            echo >&2 "PR merged successfully on attempt $attempt."
+            return 0
+        fi
+
+        if [[ $attempt -lt $max_attempts ]]; then
+            local sleep_time=$((attempt * 2))
+            echo >&2 "Merge failed, retrying in ${sleep_time}s..."
+            sleep $sleep_time
+        fi
+    done
+
+    echo >&2 "Failed to merge PR after $max_attempts attempts."
+    return 1
+}
+
 wait_for_workflow() {
     local pr_number=$1 # PR number that was merged
     local merged_branch_name=$2 # The head branch name of the merged PR (unused now, but kept for context)
@@ -268,7 +295,10 @@ echo >&2 "--- Testing Initial Merge (PR1) ---"
 
 # 5. Trigger Action by Squash Merging PR1
 echo >&2 "5. Squash merging PR #$PR1_NUM to trigger the action..."
-log_cmd gh pr merge "$PR1_URL" --squash --repo "$REPO_FULL_NAME"
+if ! merge_pr_with_retry "$PR1_URL"; then
+    echo >&2 "Failed to merge PR #$PR1_NUM."
+    exit 1
+fi
 MERGE_COMMIT_SHA1=$(gh pr view "$PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA1" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR1_NUM."
@@ -389,7 +419,10 @@ log_cmd git push origin main
 
 # 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
 echo >&2 "9. Squash merging PR #$PR2_NUM (feature2) to trigger conflict..."
-log_cmd gh pr merge "$PR2_URL" --squash --repo "$REPO_FULL_NAME"
+if ! merge_pr_with_retry "$PR2_URL"; then
+    echo >&2 "Failed to merge PR #$PR2_NUM."
+    exit 1
+fi
 MERGE_COMMIT_SHA2=$(gh pr view "$PR2_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
 if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
     echo >&2 "Failed to get merge commit SHA for PR #$PR2_NUM."
