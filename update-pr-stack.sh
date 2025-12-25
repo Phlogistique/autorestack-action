@@ -6,6 +6,13 @@
 # SQUASH_COMMIT - The hash of the squash commit that was merged
 # MERGED_BRANCH - The name of the branch that was merged and will be deleted
 # TARGET_BRANCH - The name of the branch that the PR was merged into
+#
+# Design note:
+# This script aims to output a transcript of "plain" git/gh commands that a
+# human could follow through manually. For this reason:
+# - We use git refs (e.g., SQUASH_COMMIT) instead of shell variables where
+#   possible, so the logged commands are self-contained and reproducible
+# - We strive to keep commands as simple as possible
 
 set -ueo pipefail  # Exit on error, undefined var, or pipeline failure
 
@@ -26,12 +33,19 @@ check_env_var() {
     fi
 }
 
-skip_if_clean() {
+# Check if BASE is already an ancestor of BRANCH (simple merge check)
+is_base_ancestor() {
     local BRANCH="$1"
     local BASE="$2"
-    # If BASE is already an ancestor of BRANCH *and*
-    # the squash commit is already in history, we're done.
-    git merge-base --is-ancestor "origin/$BASE" "origin/$BRANCH" \
+    git merge-base --is-ancestor "origin/$BASE" "origin/$BRANCH"
+}
+
+# Check if a branch already has the squash commit merged (squash-merge mode only)
+# Requires SQUASH_COMMIT ref to be set via git update-ref
+has_squash_commit() {
+    local BRANCH="$1"
+    local BASE="$2"
+    is_base_ancestor "$BRANCH" "$BASE" \
         && git merge-base --is-ancestor SQUASH_COMMIT "origin/$BRANCH"
 }
 
@@ -50,7 +64,7 @@ update_direct_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
 
-    if skip_if_clean "$BRANCH" "$TARGET_BRANCH"; then
+    if has_squash_commit "$BRANCH" "$TARGET_BRANCH"; then
         echo "✓ $BRANCH already up-to-date; skipping"
         return
     fi
@@ -108,7 +122,10 @@ update_indirect_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
 
-    if skip_if_clean "$BRANCH" "$BASE_BRANCH"; then
+    # For indirect targets, we only need to check if the parent is already
+    # an ancestor. If so, the branch already has all updates from the parent.
+    # (No SQUASH_COMMIT check needed - that's only for direct targets)
+    if is_base_ancestor "$BRANCH" "$BASE_BRANCH"; then
         echo "✓ $BRANCH already up-to-date with $BASE_BRANCH; skipping"
         return
     fi
