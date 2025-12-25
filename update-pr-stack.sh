@@ -66,7 +66,7 @@ update_direct_target() {
 
     if has_squash_commit "$BRANCH" "$TARGET_BRANCH"; then
         echo "✓ $BRANCH already up-to-date; skipping"
-        return
+        return 0
     fi
 
     echo "Updating direct target $BRANCH (from $MERGED_BRANCH to $BASE_BRANCH)"
@@ -109,6 +109,7 @@ update_direct_target() {
         # Create the label if it doesn't exist, then add it to the PR
         gh label create "$CONFLICT_LABEL" --description "PR needs manual conflict resolution" --color "d73a4a" 2>/dev/null || true
         log_cmd gh pr edit "$BRANCH" --add-label "$CONFLICT_LABEL"
+        return 1
     else
         log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
         log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
@@ -116,6 +117,8 @@ update_direct_target() {
         CUSTOM_COMMIT=$(log_cmd git commit-tree MERGE_RESULT -p BEFORE_MERGE -p "origin/$MERGED_BRANCH" -p SQUASH_COMMIT -m "$COMMIT_MSG")
         log_cmd git reset --hard "$CUSTOM_COMMIT"
     fi
+
+    return 0
 }
 
 update_indirect_target() {
@@ -235,8 +238,11 @@ main() {
     INITIAL_TARGETS=($(log_cmd gh pr list --base "$MERGED_BRANCH" --json headRefName --jq '.[].headRefName'))
 
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
-        update_direct_target "$BRANCH" "$TARGET_BRANCH"
-        update_branch_recursive "$BRANCH"
+        if update_direct_target "$BRANCH" "$TARGET_BRANCH"; then
+            update_branch_recursive "$BRANCH"
+        else
+            echo "⚠️ Skipping descendants of $BRANCH until conflicts are resolved"
+        fi
     done
 
     # Update base branches for direct target PRs
