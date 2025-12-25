@@ -7,7 +7,7 @@
 # MERGED_BRANCH - The name of the branch that was merged and will be deleted
 # TARGET_BRANCH - The name of the branch that the PR was merged into
 
-set -ue  # Exit immediately if a command exits with a non-zero status.
+set -ueo pipefail  # Exit on error, undefined var, or pipeline failure
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/command_utils.sh"
@@ -60,11 +60,11 @@ update_direct_target() {
     log_cmd git update-ref BEFORE_MERGE HEAD
     if ! log_cmd git merge --no-edit "origin/$MERGED_BRANCH"; then
         CONFLICTS+=("origin/$MERGED_BRANCH")
-        git merge --abort
+        log_cmd git merge --abort
     fi
     if ! log_cmd git merge --no-edit SQUASH_COMMIT~; then
         CONFLICTS+=( "$(git rev-parse SQUASH_COMMIT~)" )
-        git merge --abort
+        log_cmd git merge --abort
     fi
 
     if [[ "${#CONFLICTS[@]}" -gt 0 ]]; then
@@ -79,7 +79,7 @@ update_direct_target() {
             echo "#### How to resolve"
             echo '```bash'
             echo "git fetch origin"
-            echo "git switch $CHILD"
+            echo "git switch $BRANCH"
             for conflict in "${CONFLICTS[@]}"; do
                 echo "git merge $conflict"
                 echo "# ..."
@@ -89,8 +89,10 @@ update_direct_target() {
             done
             echo "git push"
             echo '```'
-        } | gh pr comment -F -
-        gh pr edit --add-label autorestack-needs-conflict-resolution
+        } | log_cmd gh pr comment "$BRANCH" -F -
+        # Create the label if it doesn't exist, then add it to the PR
+        gh label create autorestack-needs-conflict-resolution --description "PR needs manual conflict resolution" --color "d73a4a" 2>/dev/null || true
+        log_cmd gh pr edit "$BRANCH" --add-label autorestack-needs-conflict-resolution
     else
         log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
         log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"

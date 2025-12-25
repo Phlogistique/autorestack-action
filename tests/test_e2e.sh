@@ -29,6 +29,15 @@ WORKFLOW_FILE="update-pr-stack.yml"
 
 # --- Helper Functions ---
 cleanup() {
+  local exit_code=$?
+  # If PRESERVE_ON_FAILURE is set and there was an error, skip cleanup
+  if [[ "${PRESERVE_ON_FAILURE:-}" == "1" ]] && [[ $exit_code -ne 0 ]]; then
+    echo >&2 "--- Preserving repo for debugging (PRESERVE_ON_FAILURE=1) ---"
+    echo >&2 "Repo: $REPO_FULL_NAME"
+    echo >&2 "Local dir: $TEST_DIR"
+    return 0
+  fi
+
   echo >&2 "--- Cleaning up ---"
   if [[ -d "$TEST_DIR" ]]; then
     echo >&2 "Removing local test directory: $TEST_DIR"
@@ -50,6 +59,7 @@ cleanup() {
 
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
+
 
 # Merge a PR with retry logic to handle transient "not mergeable" errors.
 # After pushing to a PR's base branch, GitHub's mergeability computation is async
@@ -196,10 +206,15 @@ log_cmd git init -b main
 log_cmd git config user.email "test-e2e@example.com"
 log_cmd git config user.name "E2E Test Bot"
 
-# Create initial content
+# Create initial content with enough lines for context separation
+# (Git needs ~3 lines of context between changes to avoid treating them as overlapping hunks)
 echo "Base file content line 1" > file.txt
 echo "Base file content line 2" >> file.txt
 echo "Base file content line 3" >> file.txt
+echo "Base file content line 4" >> file.txt
+echo "Base file content line 5" >> file.txt
+echo "Base file content line 6" >> file.txt
+echo "Base file content line 7" >> file.txt
 log_cmd git add file.txt
 log_cmd git commit -m "Initial commit"
 INITIAL_COMMIT_SHA=$(git rev-parse HEAD)
@@ -337,8 +352,6 @@ else
 fi
 # Verify local branches are updated to include the squash commit
 echo >&2 "Checking if branches incorporate the squash commit..."
-log_cmd git checkout main # Ensure main is up-to-date locally
-log_cmd git pull origin main
 log_cmd git checkout feature2 # Checkout local branch first
 log_cmd git pull origin feature2 # Pull updates pushed by the action
 log_cmd git checkout feature3
@@ -398,18 +411,18 @@ echo >&2 "--- Testing Conflict Scenario (Merging PR2) ---"
 
 # 8. Introduce conflicting changes
 echo >&2 "8. Introducing conflicting changes..."
-# Change line 3 on feature3
+# Change line 7 on feature3 (far from line 2 to avoid adjacent-line conflicts)
 log_cmd git checkout feature3
-sed -i '3s/.*/Feature 3 conflicting change line 3/' file.txt
+sed -i '7s/.*/Feature 3 conflicting change line 7/' file.txt
 log_cmd git add file.txt
-log_cmd git commit -m "Conflict: Modify line 3 on feature3"
+log_cmd git commit -m "Conflict: Modify line 7 on feature3"
 FEATURE3_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
 log_cmd git push origin feature3
-# Change line 3 on main
+# Change line 7 on main differently - this will conflict when rebasing feature3 after PR2 merge
 log_cmd git checkout main
-sed -i '3s/.*/Main conflicting change line 3/' file.txt
+sed -i '7s/.*/Main conflicting change line 7/' file.txt
 log_cmd git add file.txt
-log_cmd git commit -m "Conflict: Modify line 3 on main"
+log_cmd git commit -m "Conflict: Modify line 7 on main"
 log_cmd git push origin main
 
 # 9. Trigger Action by Squash Merging PR2 (which is now based on the updated main from step 7)
@@ -501,9 +514,6 @@ echo >&2 "12. Resolving conflict manually on feature3..."
 log_cmd git checkout feature3
 # Ensure we have the latest main which includes the PR2 merge commit AND the conflicting change on main
 log_cmd git fetch origin
-log_cmd git checkout main
-log_cmd git pull origin main # Make sure local main is up-to-date
-log_cmd git checkout feature3
 # Now, perform the merge that the action tried and failed
 echo >&2 "Attempting merge of origin/main into feature3..."
 if git merge origin/main; then
@@ -515,11 +525,9 @@ else
     echo >&2 "Merge conflict occurred as expected. Resolving..."
     # Check status to confirm conflict
     log_cmd git status
-    # Resolve conflict - let's keep the change from feature3 ("Feature 3 conflicting change line 3")
-    # Remove conflict markers and keep the desired line 3
-    sed -i '/<<<<<<< HEAD/,/=======/{//!d}' file.txt # Remove lines between <<<< and ==== (inclusive of <<<<)
-    sed -i '/=======/,/>>>>>>> origin\/main/d' file.txt # Remove lines between ==== and >>>> (inclusive of ==== and >>>>)
-
+    # Resolve conflict - keep feature3's version (ours) of the conflicting file
+    # This preserves both line 2 (Feature 3 content) and line 7 (Feature 3 conflicting change)
+    log_cmd git checkout --ours file.txt
     echo "Resolved file.txt content:"
     cat file.txt
     log_cmd git add file.txt
@@ -534,8 +542,6 @@ echo >&2 "Pushed resolved feature3."
 echo >&2 "13. Verifying conflict resolution..."
 # Fetch the latest state again
 log_cmd git fetch origin
-log_cmd git checkout main
-log_cmd git pull origin main
 log_cmd git checkout feature3
 log_cmd git pull origin feature3
 
@@ -551,25 +557,25 @@ fi
 # Verify the final content of file.txt on feature3
 # Line 1: Original base
 # Line 2: From feature 3 commit ("Feature 3 content line 2")
-# Line 3: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 3")
+# Line 7: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 7")
 EXPECTED_CONTENT_LINE1="Base file content line 1"
 EXPECTED_CONTENT_LINE2="Feature 3 content line 2"
-EXPECTED_CONTENT_LINE3="Feature 3 conflicting change line 3"
+EXPECTED_CONTENT_LINE7="Feature 3 conflicting change line 7"
 
 ACTUAL_CONTENT_LINE1=$(sed -n '1p' file.txt)
 ACTUAL_CONTENT_LINE2=$(sed -n '2p' file.txt)
-ACTUAL_CONTENT_LINE3=$(sed -n '3p' file.txt)
+ACTUAL_CONTENT_LINE7=$(sed -n '7p' file.txt)
 
 if [[ "$ACTUAL_CONTENT_LINE1" == "$EXPECTED_CONTENT_LINE1" && \
       "$ACTUAL_CONTENT_LINE2" == "$EXPECTED_CONTENT_LINE2" && \
-      "$ACTUAL_CONTENT_LINE3" == "$EXPECTED_CONTENT_LINE3" ]]; then
+      "$ACTUAL_CONTENT_LINE7" == "$EXPECTED_CONTENT_LINE7" ]]; then
     echo >&2 "✅ Verification Passed: file.txt content on resolved feature3 is correct."
 else
     echo >&2 "❌ Verification Failed: file.txt content on resolved feature3 is incorrect."
     echo "Expected:"
     echo "$EXPECTED_CONTENT_LINE1"
     echo "$EXPECTED_CONTENT_LINE2"
-    echo "$EXPECTED_CONTENT_LINE3"
+    echo "$EXPECTED_CONTENT_LINE7"
     echo "Actual:"
     cat file.txt
     exit 1
