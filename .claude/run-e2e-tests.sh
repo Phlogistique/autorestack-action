@@ -69,7 +69,7 @@ acquire_token() {
     fi
 
     # Generate token using the Python script
-    if ! uv run "$SCRIPT_DIR/get_github_app_token.py" > "$TOKEN_FILE" 2>/dev/null; then
+    if ! uv run "$PROJECT_ROOT/tests/get_github_app_token.py" > "$TOKEN_FILE" 2>/dev/null; then
         log_error "Failed to generate GitHub App token"
         return 1
     fi
