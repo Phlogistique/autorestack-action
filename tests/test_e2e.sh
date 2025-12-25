@@ -831,6 +831,7 @@ fi
 # Line 1: Original base
 # Line 2: From feature 3 commit ("Feature 3 content line 2")
 # Line 7: From feature 3 conflict commit, kept during resolution ("Feature 3 conflicting change line 7")
+log_cmd git checkout feature3
 EXPECTED_CONTENT_LINE1="Base file content line 1"
 EXPECTED_CONTENT_LINE2="Feature 3 content line 2"
 EXPECTED_CONTENT_LINE7="Feature 3 conflicting change line 7"
