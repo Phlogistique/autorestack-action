@@ -67,11 +67,13 @@
 #   - Conflict label "autorestack-needs-conflict-resolution" exists on PR3
 #   - feature3 branch was NOT updated (still at pre-conflict SHA)
 #
-# Manual Conflict Resolution (Steps 12-13):
+# Manual Conflict Resolution (Steps 12-14):
 #   - Test simulates user resolving the conflict manually
 #   - Merge main into feature3, resolve conflict (keep feature3's changes)
 #   - Push the resolved branch
-#   - Verify the resolved state is correct
+#   - The push triggers the 'synchronize' event on PR3
+#   - The action detects the conflict label and removes it
+#   - Verify the label is removed and resolution comment is posted
 #
 # =============================================================================
 set -e # Exit immediately if a command exits with a non-zero status.
@@ -160,6 +162,98 @@ merge_pr_with_retry() {
     done
 
     echo >&2 "Failed to merge PR after $max_attempts attempts."
+    return 1
+}
+
+wait_for_synchronize_workflow() {
+    local pr_number=$1 # PR number that was updated
+    local branch_name=$2 # The branch name that was pushed
+    local expected_conclusion=${3:-success} # Expected conclusion (success, failure, etc.)
+    local max_attempts=20 # ~7 mins max wait
+    local attempt=0
+    local target_run_id=""
+    local start_time=$(date +%s)
+
+    echo >&2 "Waiting for workflow '$WORKFLOW_FILE' triggered by synchronize event on PR #$pr_number (branch $branch_name)..."
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        sleep_time=$(( (attempt + 1) * 2 ))
+        echo >&2 "Attempt $((attempt + 1))/$max_attempts: Checking for workflow run..."
+
+        if [[ -z "$target_run_id" ]]; then
+            echo >&2 "Searching for the specific workflow run..."
+            # List recent runs for the workflow triggered by pull_request event
+            candidate_run_ids=$(log_cmd gh run list \
+                --repo "$REPO_FULL_NAME" \
+                --workflow "$WORKFLOW_FILE" \
+                --event pull_request \
+                --limit 15 \
+                --json databaseId,createdAt --jq '.[] | select(.createdAt >= "'$(date -d "@$start_time" -Iseconds 2>/dev/null || date -r $start_time +%Y-%m-%dT%H:%M:%S)'") | .databaseId' || echo "")
+
+            if [[ -z "$candidate_run_ids" ]]; then
+                echo >&2 "No recent '$WORKFLOW_FILE' runs found since start. Sleeping $sleep_time seconds."
+                sleep $sleep_time
+                attempt=$((attempt + 1))
+                continue
+            fi
+
+            echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
+            for run_id in $candidate_run_ids; do
+                echo >&2 "Checking candidate run ID: $run_id"
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,jobs || echo "{}")
+
+                run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
+                # Check if this run has the continue-after-conflict-resolution job
+                has_continue_job=$(echo "$run_info" | jq -r '.jobs[] | select(.name == "continue-after-conflict-resolution") | .name' || echo "")
+
+                echo >&2 "  Run head branch: $run_head_branch, has continue job: $has_continue_job"
+
+                if [[ "$run_head_branch" == "$branch_name" && -n "$has_continue_job" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (synchronize with continue job)"
+                    target_run_id="$run_id"
+                    break
+                fi
+            done
+        fi
+
+        if [[ -z "$target_run_id" ]]; then
+            echo >&2 "Target workflow run not found among recent runs. Sleeping $sleep_time seconds."
+            sleep $sleep_time
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        # Monitor the identified target run
+        echo >&2 "Monitoring workflow run ID: $target_run_id"
+        run_info=$(log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --json status,conclusion)
+        run_status=$(echo "$run_info" | jq -r '.status')
+        run_conclusion=$(echo "$run_info" | jq -r '.conclusion')
+
+        echo >&2 "Workflow run $target_run_id status: $run_status, conclusion: $run_conclusion"
+
+        if [[ "$run_status" == "completed" ]]; then
+            if [[ "$run_conclusion" == "$expected_conclusion" ]]; then
+                echo >&2 "Workflow $target_run_id completed with expected conclusion: $run_conclusion."
+                return 0
+            else
+                echo >&2 "Workflow $target_run_id completed with unexpected conclusion: $run_conclusion (expected: $expected_conclusion)"
+                log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $target_run_id"
+                return 1
+            fi
+        elif [[ "$run_status" == "queued" || "$run_status" == "in_progress" || "$run_status" == "waiting" ]]; then
+            echo >&2 "Workflow $target_run_id is $run_status. Sleeping $sleep_time seconds."
+        else
+            echo >&2 "Workflow $target_run_id has unexpected status: $run_status. Conclusion: $run_conclusion"
+            log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --log || echo >&2 "Could not fetch logs for run $target_run_id"
+            return 1
+        fi
+
+        sleep $sleep_time
+        attempt=$((attempt + 1))
+    done
+
+    echo >&2 "Timeout waiting for synchronize workflow run to complete."
+    gh run list --repo "$REPO_FULL_NAME" --workflow "$WORKFLOW_FILE" --limit 10 || echo >&2 "Could not list recent runs."
     return 1
 }
 
@@ -303,7 +397,7 @@ cat > .github/workflows/"$WORKFLOW_FILE" <<EOF
 name: Update Stacked PRs on Squash Merge (E2E Test)
 on:
   pull_request:
-    types: [closed]
+    types: [closed, synchronize]
 permissions:
   contents: write
   pull-requests: write
@@ -311,6 +405,7 @@ jobs:
   update-pr-stack:
     # Only run on actual squash merges initiated by the test script
     if: |
+      github.event.action == 'closed' &&
       github.event.pull_request.merged == true &&
       github.event.pull_request.merge_commit_sha != ''
     runs-on: ubuntu-latest
@@ -327,6 +422,24 @@ jobs:
         uses: ./
         with:
           github-token: \${{ secrets.GITHUB_TOKEN }}
+  continue-after-conflict-resolution:
+    # Run when a PR with the conflict label is updated (user pushed conflict resolution)
+    if: |
+      github.event.action == 'synchronize' &&
+      contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: \${{ secrets.GITHUB_TOKEN }}
+      - name: Continue PR stack update after conflict resolution
+        uses: ./
+        with:
+          github-token: \${{ secrets.GITHUB_TOKEN }}
+          mode: conflict-resolved
+          pr-branch: \${{ github.event.pull_request.head.ref }}
 EOF
 
 log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
@@ -610,8 +723,44 @@ fi
 log_cmd git push origin feature3
 echo >&2 "Pushed resolved feature3."
 
-# 13. Verify conflict resolution
-echo >&2 "13. Verifying conflict resolution..."
+# 13. Wait for continuation workflow triggered by push
+echo >&2 "13. Waiting for continuation workflow after conflict resolution push..."
+if ! wait_for_synchronize_workflow "$PR3_NUM" "feature3" "success"; then
+    echo >&2 "Continuation workflow for feature3 conflict resolution did not complete successfully."
+    exit 1
+fi
+
+# 14. Verify continuation workflow effects
+echo >&2 "14. Verifying continuation workflow effects..."
+
+# Verify conflict label was removed from PR3
+echo >&2 "Checking that conflict label was removed from PR #$PR3_NUM..."
+sleep 5 # Give GitHub time to process
+CONFLICT_LABEL_AFTER=$(log_cmd gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+if [[ -z "$CONFLICT_LABEL_AFTER" ]]; then
+    echo >&2 "✅ Verification Passed: Conflict label was removed from PR #$PR3_NUM."
+else
+    echo >&2 "❌ Verification Failed: Conflict label still exists on PR #$PR3_NUM."
+    exit 1
+fi
+
+# Verify resolution acknowledgement comment exists on PR3
+echo >&2 "Checking for resolution acknowledgement comment on PR #$PR3_NUM..."
+RESOLUTION_COMMENT=$(log_cmd gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[] | select(.body | contains("Conflict resolved")) | .body')
+if [[ -n "$RESOLUTION_COMMENT" ]]; then
+    echo >&2 "✅ Verification Passed: Resolution acknowledgement comment found on PR #$PR3_NUM."
+else
+    echo >&2 "❌ Verification Failed: Resolution acknowledgement comment not found on PR #$PR3_NUM."
+    echo >&2 "--- Comments on PR #$PR3_NUM ---"
+    gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[].body' || echo "Failed to get comments"
+    echo >&2 "-----------------------------"
+    exit 1
+fi
+
+echo >&2 "--- Continuation Workflow Test Completed Successfully ---"
+
+# 15. Verify conflict resolution (content checks)
+echo >&2 "15. Verifying conflict resolution content..."
 # Fetch the latest state again
 log_cmd git fetch origin
 log_cmd git checkout feature3
@@ -652,9 +801,6 @@ else
     cat file.txt
     exit 1
 fi
-
-# Optional: Verify the conflict label could be removed (manual step usually)
-# We won't automate label removal check as the action doesn't do it.
 
 echo >&2 "--- Conflict Scenario Test Completed Successfully ---"
 

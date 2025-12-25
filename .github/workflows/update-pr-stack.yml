@@ -2,7 +2,7 @@ name: Optimized Recursive Update of PR Stack on Squash Merge
 
 on:
   pull_request:
-    types: [closed]
+    types: [closed, synchronize]
 
 permissions:
   contents: write
@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   update-pr-stack:
-    if: github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha != ''
+    if: github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha != ''
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -23,3 +23,19 @@ jobs:
         uses: ./
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  continue-after-conflict-resolution:
+    if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Continue PR stack update after conflict resolution
+        uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          mode: conflict-resolved
+          pr-branch: ${{ github.event.pull_request.head.ref }}
