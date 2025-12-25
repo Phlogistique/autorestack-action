@@ -33,6 +33,7 @@ jobs:
         env:
           GH_APP_ID: ${{ vars.GH_APP_ID }}
           GH_APP_PRIVATE_KEY_PEM_B64: ${{ secrets.GH_APP_PRIVATE_KEY_PEM_B64 }}
+          PRESERVE_ON_FAILURE: "1"
         run: |
           export GH_TOKEN=$(uv run tests/get_github_app_token.py)
           gh auth setup-git
