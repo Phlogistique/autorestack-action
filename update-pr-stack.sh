@@ -27,7 +27,7 @@ CONFLICT_LABEL="autorestack-needs-conflict-resolution"
 
 # Function to check if a required environment variable is set
 check_env_var() {
-    if [ -z "${!1}" ]; then
+    if [[ -z "${!1-}" ]]; then
         echo "Error: $1 is not set" >&2
         exit 1
     fi
