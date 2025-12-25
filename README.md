@@ -20,7 +20,7 @@ This action tries to fix that in a transparent way. Install it, and hopefully th
 2. Finds PRs that were based on the merged branch
 3. For direct children: creates a synthetic merge commit with three parents (child tip, deleted branch tip, squash commit) to preserve history without re-introducing code
 4. For indirect descendants: merges the updated parent branch
-5. Updates each PR's base branch to point to trunk
+5. Updates the direct child PRs to base on trunk now that the bottom change has landed; higher PRs stay based on their parent
 6. Force-pushes updated branches and deletes the merged branch
 
 ### Conflict handling
