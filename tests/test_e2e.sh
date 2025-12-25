@@ -1,8 +1,79 @@
 #!/bin/bash
-# End-to-End test for the update-pr-stack action.
+# =============================================================================
+# End-to-End Test for the update-pr-stack Action
+# =============================================================================
+#
+# PURPOSE:
+# This test validates the full functionality of the update-pr-stack GitHub
+# Action, which automatically updates stacked PRs after a base PR is merged.
+#
 # WARNING: This test creates and deletes a REAL GitHub repository.
 # It requires a GITHUB_TOKEN environment variable with appropriate permissions:
 # repo (full control), workflow, pull_request (write).
+#
+# =============================================================================
+# TEST SCENARIOS
+# =============================================================================
+#
+# SCENARIO 1: Nominal Linear Stack with Clean Merges (Steps 1-7)
+# --------------------------------------------------------------
+# Tests the happy path where PRs are merged without conflicts.
+#
+# Setup:
+#   - Create a stack of 3 PRs: main <- feature1 <- feature2 <- feature3
+#   - Each PR modifies line 2 of file.txt (same line, different content)
+#
+# Action Trigger:
+#   - Squash merge PR1 (feature1) into main
+#
+# Expected Behavior:
+#   - The action should detect that PR2 (feature2) was based on feature1
+#   - Update PR2's base branch from feature1 to main
+#   - Merge main into feature2 to incorporate the squash commit
+#   - Propagate the merge to feature3 as well
+#   - Delete the merged branch (feature1)
+#
+# Verifications:
+#   - feature1 branch is deleted from remote
+#   - PR2 base branch is updated from feature1 to main
+#   - PR3 base branch remains feature2 (only direct children are updated)
+#   - feature2 and feature3 branches contain the squash merge commit
+#   - PR diffs show the correct changes relative to their new bases
+#
+# SCENARIO 2: Conflict Handling (Steps 8-13)
+# ------------------------------------------
+# Tests the action's behavior when a merge conflict occurs.
+#
+# Setup:
+#   - After Scenario 1, modify line 7 on feature3 and push
+#   - Also modify line 7 on main with different content (creating a conflict)
+#
+# Action Trigger:
+#   - Squash merge PR2 (feature2) into main
+#
+# Expected Behavior:
+#   - The action attempts to merge main into feature3
+#   - Detects a merge conflict (both modified line 7 differently)
+#   - Does NOT push any conflicted state to the remote
+#   - Posts a comment on PR3 explaining the conflict
+#   - Adds a label "autorestack-needs-conflict-resolution" to PR3
+#   - Updates PR3's base branch to main (even though merge failed)
+#   - Exits with success (conflict is handled gracefully, not a failure)
+#
+# Verifications:
+#   - feature2 branch is deleted from remote
+#   - PR3 base branch is updated to main
+#   - Conflict comment exists on PR3
+#   - Conflict label "autorestack-needs-conflict-resolution" exists on PR3
+#   - feature3 branch was NOT updated (still at pre-conflict SHA)
+#
+# Manual Conflict Resolution (Steps 12-13):
+#   - Test simulates user resolving the conflict manually
+#   - Merge main into feature3, resolve conflict (keep feature3's changes)
+#   - Push the resolved branch
+#   - Verify the resolved state is correct
+#
+# =============================================================================
 set -e # Exit immediately if a command exits with a non-zero status.
 # set -x # Debugging: print commands as they are executed
 # --- Configuration ---
@@ -420,6 +491,7 @@ FEATURE3_CONFLICT_COMMIT_SHA=$(git rev-parse HEAD) # Store this SHA
 log_cmd git push origin feature3
 # Change line 7 on main differently - this will conflict when rebasing feature3 after PR2 merge
 log_cmd git checkout main
+log_cmd git pull origin main  # Pull latest changes from PR1 merge
 sed -i '7s/.*/Main conflicting change line 7/' file.txt
 log_cmd git add file.txt
 log_cmd git commit -m "Conflict: Modify line 7 on main"
