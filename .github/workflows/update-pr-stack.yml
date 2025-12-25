@@ -1,4 +1,4 @@
-name: Optimized Recursive Update of PR Stack on Squash Merge
+name: Update PR Stack
 
 on:
   pull_request:
