@@ -34,6 +34,6 @@ jobs:
           GH_APP_ID: ${{ secrets.GH_APP_ID }}
           GH_APP_PRIVATE_KEY_PEM_B64: ${{ secrets.GH_APP_PRIVATE_KEY_PEM_B64 }}
         run: |
-          export GH_TOKEN=$(uv run .claude/get_github_app_token.py)
+          export GH_TOKEN=$(uv run tests/get_github_app_token.py)
           gh auth setup-git
           bash tests/test_e2e.sh
