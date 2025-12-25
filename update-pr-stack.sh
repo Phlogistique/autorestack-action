@@ -51,9 +51,7 @@ has_squash_commit() {
 
 ensure_local_branch() {
     local BRANCH="$1"
-    if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-        log_cmd git branch -f "$BRANCH" "origin/$BRANCH"
-    fi
+    log_cmd git branch -f "$BRANCH" "origin/$BRANCH"
 }
 
 UPDATED_BRANCHES=()
