@@ -33,20 +33,16 @@ check_env_var() {
     fi
 }
 
-# Check if BASE is already an ancestor of BRANCH (simple merge check)
-is_base_ancestor() {
-    local BRANCH="$1"
-    local BASE="$2"
-    git merge-base --is-ancestor "origin/$BASE" "origin/$BRANCH"
-}
-
 # Check if a branch already has the squash commit merged (squash-merge mode only)
 # Requires SQUASH_COMMIT ref to be set via git update-ref
+#
+# Note: This uses local branch refs. The caller must ensure both branches
+# exist locally before calling (e.g., via git checkout).
 has_squash_commit() {
     local BRANCH="$1"
     local BASE="$2"
-    is_base_ancestor "$BRANCH" "$BASE" \
-        && git merge-base --is-ancestor SQUASH_COMMIT "origin/$BRANCH"
+    git merge-base --is-ancestor "$BASE" "$BRANCH" \
+        && git merge-base --is-ancestor SQUASH_COMMIT "$BRANCH"
 }
 
 format_branch_list_for_text() {
@@ -64,13 +60,17 @@ update_direct_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
 
+    # Checkout first to ensure the local branch exists (created from origin if
+    # needed). This allows has_squash_commit to compare local refs, which matters
+    # for testing where the script may run multiple times in the same repo.
+    log_cmd git checkout "$BRANCH"
+
     if has_squash_commit "$BRANCH" "$TARGET_BRANCH"; then
         echo "✓ $BRANCH already up-to-date; skipping"
         return
     fi
 
     echo "Updating direct target $BRANCH (from $MERGED_BRANCH to $BASE_BRANCH)"
-    log_cmd git checkout "$BRANCH"
 
     CONFLICTS=()
     log_cmd git update-ref BEFORE_MERGE HEAD
@@ -122,16 +122,21 @@ update_indirect_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
 
-    # For indirect targets, we only need to check if the parent is already
-    # an ancestor. If so, the branch already has all updates from the parent.
-    # (No SQUASH_COMMIT check needed - that's only for direct targets)
-    if is_base_ancestor "$BRANCH" "$BASE_BRANCH"; then
+    # At this point in the control flow:
+    # - BASE_BRANCH has already been checked out and potentially modified locally
+    # - BRANCH has not been touched yet
+    #
+    # We checkout BRANCH first (which creates the local branch from origin if
+    # needed), then compare against the local BASE_BRANCH to check if it's
+    # already an ancestor.
+    log_cmd git checkout "$BRANCH"
+
+    if git merge-base --is-ancestor "$BASE_BRANCH" "$BRANCH"; then
         echo "✓ $BRANCH already up-to-date with $BASE_BRANCH; skipping"
         return
     fi
 
     echo "Updating indirect target $BRANCH (based on $BASE_BRANCH)"
-    log_cmd git checkout "$BRANCH"
     log_cmd git merge --no-edit "$BASE_BRANCH"
 }
 
