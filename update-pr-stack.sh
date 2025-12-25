@@ -49,12 +49,10 @@ has_squash_commit() {
         && git merge-base --is-ancestor SQUASH_COMMIT "$BRANCH"
 }
 
-resolve_branch_ref() {
+ensure_local_branch() {
     local BRANCH="$1"
-    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
-        echo "$BRANCH"
-    else
-        echo "origin/$BRANCH"
+    if ! git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+        log_cmd git branch -f "$BRANCH" "origin/$BRANCH"
     fi
 }
 
@@ -83,13 +81,11 @@ format_branch_list_for_text() {
 update_direct_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
-    local BRANCH_REF
-    local BASE_REF
 
-    BRANCH_REF=$(resolve_branch_ref "$BRANCH")
-    BASE_REF=$(resolve_branch_ref "$BASE_BRANCH")
+    ensure_local_branch "$BRANCH"
+    ensure_local_branch "$BASE_BRANCH"
 
-    if has_squash_commit "$BRANCH_REF" "$BASE_REF"; then
+    if has_squash_commit "$BRANCH" "$BASE_BRANCH"; then
         echo "✓ $BRANCH already up-to-date; skipping"
         return
     fi
@@ -147,23 +143,21 @@ update_direct_target() {
 update_indirect_target() {
     local BRANCH="$1"
     local BASE_BRANCH="$2"
-    local BRANCH_REF
-    local BASE_REF
-
-    BRANCH_REF=$(resolve_branch_ref "$BRANCH")
-    BASE_REF=$(resolve_branch_ref "$BASE_BRANCH")
 
     # For indirect targets, we only need to check if the parent is already
     # an ancestor. If so, the branch already has all updates from the parent.
     # (No SQUASH_COMMIT check needed - that's only for direct targets)
-    if is_base_ancestor "$BRANCH_REF" "$BASE_REF"; then
+    ensure_local_branch "$BRANCH"
+    ensure_local_branch "$BASE_BRANCH"
+
+    if is_base_ancestor "$BRANCH" "$BASE_BRANCH"; then
         echo "✓ $BRANCH already up-to-date with $BASE_BRANCH; skipping"
         return
     fi
 
     echo "Updating indirect target $BRANCH (based on $BASE_BRANCH)"
     log_cmd git checkout "$BRANCH"
-    log_cmd git merge --no-edit "$BASE_REF"
+    log_cmd git merge --no-edit "$BASE_BRANCH"
     add_updated_branch "$BRANCH"
 }
 
