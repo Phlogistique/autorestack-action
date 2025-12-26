@@ -8,8 +8,15 @@
 # Action, which automatically updates stacked PRs after a base PR is merged.
 #
 # WARNING: This test creates and deletes a REAL GitHub repository.
-# It requires a GITHUB_TOKEN environment variable with appropriate permissions:
-# repo (full control), workflow, pull_request (write).
+#
+# REQUIRED ENVIRONMENT:
+# - GITHUB_TOKEN or GH_TOKEN: Token with repo, workflow, pull_request permissions
+#
+# OPTIONAL ENVIRONMENT:
+# - E2E_REVIEWER_ID: GitHub user ID for environment protection approval.
+#   Required for "broken diff" validation (pausing workflow mid-execution).
+#   Find your ID with: gh api /user --jq '.id'
+#   If not set, the test falls back to checking only the final "fixed" state.
 #
 # =============================================================================
 # TEST SCENARIOS
@@ -637,17 +644,27 @@ log_cmd gh api -X PUT "/repos/$REPO_FULL_NAME/actions/permissions" --input - <<<
 
 echo >&2 "Setting up environment protection for diff validation..."
 
-# Try to set up environment protection. This requires 'administration:write' permission
-# which may not be available with all token types (e.g., GitHub App tokens might lack this).
-# If it fails, we fall back to the old behavior without broken-diff validation.
+# Try to set up environment protection. This requires:
+# 1. 'administration:write' permission on the app/token
+# 2. A valid user ID to set as the required reviewer
+#
+# For GitHub App tokens, `gh api /user` doesn't work (apps aren't users).
+# In that case, set E2E_REVIEWER_ID environment variable to a user ID who can approve.
+# You can find your user ID with: gh api /user --jq '.id'
 DIFF_VALIDATION_ENABLED=false
 
-# Get the current user's ID for the required reviewer
-REVIEWER_ID=$(gh api /user --jq '.id' 2>/dev/null || echo "")
+# Try to get reviewer ID from environment variable first, then fall back to /user API
+REVIEWER_ID="${E2E_REVIEWER_ID:-}"
 if [[ -z "$REVIEWER_ID" ]]; then
-    echo >&2 "⚠️  Could not get user ID. Diff validation will be skipped."
+    REVIEWER_ID=$(gh api /user --jq '.id' 2>/dev/null || echo "")
+fi
+
+if [[ -z "$REVIEWER_ID" || "$REVIEWER_ID" == *"message"* ]]; then
+    echo >&2 "⚠️  Could not get reviewer user ID."
+    echo >&2 "   Set E2E_REVIEWER_ID env var to enable diff validation."
+    echo >&2 "   Find your ID with: gh api /user --jq '.id'"
 else
-    echo >&2 "Current user ID: $REVIEWER_ID"
+    echo >&2 "Using reviewer ID: $REVIEWER_ID"
 
     # Create the e2e-gate environment with required reviewers
     # This will cause jobs using this environment to pause and wait for approval
@@ -666,7 +683,7 @@ EOF
         echo >&2 "Environment 'e2e-gate' ID: $E2E_GATE_ENV_ID"
         DIFF_VALIDATION_ENABLED=true
     else
-        echo >&2 "⚠️  Could not create environment (needs administration:write permission)."
+        echo >&2 "⚠️  Could not create environment with protection rules."
         echo >&2 "   Diff validation (broken state capture) will be skipped."
         echo >&2 "   The test will still verify the action works correctly."
     fi
