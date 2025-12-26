@@ -459,9 +459,11 @@ echo >&2 "2. Creating remote GitHub repository: $REPO_FULL_NAME"
 log_cmd gh repo create "$REPO_FULL_NAME" --description "Temporary E2E test repo for update-pr-stack action" --public
 echo >&2 "Successfully created $REPO_FULL_NAME"
 
-# Enable GitHub Actions on the new repository (may be disabled by default in CI environments)
-echo >&2 "Enabling GitHub Actions on the repository..."
-log_cmd gh api -X PUT "/repos/$REPO_FULL_NAME/actions/permissions" --input - <<< '{"enabled":true,"allowed_actions":"all"}'
+# Log default GitHub Actions permissions (repo inherits org/user defaults)
+echo >&2 "Checking repository Actions permissions..."
+if ! log_cmd gh api "/repos/$REPO_FULL_NAME/actions/permissions"; then
+  echo >&2 "Warning: unable to read Actions permissions for $REPO_FULL_NAME"
+fi
 
 # 3. Push initial state
 echo >&2 "3. Pushing initial state to remote..."
