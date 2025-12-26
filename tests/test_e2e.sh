@@ -564,10 +564,15 @@ echo >&2 "0d. Merging NoAct PR1 (without action installed)..."
 merge_pr_with_retry "$NOACT_PR1_URL"
 echo >&2 "NoAct PR1 merged. Branch should be auto-deleted and PR2 auto-retargeted."
 
-# Wait for GitHub to retarget PR2 to main
-if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main"; then
-    echo >&2 "❌ GitHub did not auto-retarget PR2 to main"
-    exit 1
+# Wait for GitHub to auto-retarget PR2 to main, or manually retarget if needed
+if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main" 5; then
+    # GitHub's auto-retarget didn't trigger, manually retarget
+    echo >&2 "Auto-retarget didn't occur, manually retargeting PR2 to main..."
+    log_cmd gh pr edit "$NOACT_PR2_NUM" --repo "$REPO_FULL_NAME" --base main
+    if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main" 5; then
+        echo >&2 "❌ Failed to retarget PR2 to main"
+        exit 1
+    fi
 fi
 
 # Capture diff after retarget
