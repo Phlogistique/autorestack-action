@@ -372,6 +372,34 @@ wait_for_workflow() {
 # --- Test Execution ---
 echo >&2 "--- Starting E2E Test ---"
 
+# 0. Sanity checks - ensure we're testing committed code
+echo >&2 "0. Running sanity checks..."
+
+# Check that the working directory is clean
+if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
+    echo >&2 "ERROR: Repository has uncommitted changes."
+    echo >&2 "Please commit your changes before running e2e tests."
+    echo >&2 "This ensures we test exactly what will be deployed."
+    git -C "$PROJECT_ROOT" status --short >&2
+    exit 1
+fi
+
+# Get the current commit SHA from the action repo
+ACTION_REPO_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+echo >&2 "Testing commit: $ACTION_REPO_COMMIT"
+
+# Check that the current commit exists on origin
+if ! git -C "$PROJECT_ROOT" fetch origin --quiet 2>/dev/null; then
+    echo >&2 "WARNING: Could not fetch from origin, skipping remote check"
+elif ! git -C "$PROJECT_ROOT" branch -r --contains "$ACTION_REPO_COMMIT" 2>/dev/null | grep -q .; then
+    echo >&2 "ERROR: Current commit $ACTION_REPO_COMMIT does not exist on origin."
+    echo >&2 "Please push your changes before running e2e tests."
+    echo >&2 "This ensures the workflow can reference the action at this commit."
+    exit 1
+fi
+
+echo >&2 "✅ Sanity checks passed"
+
 # 1. Setup local repository
 echo >&2 "1. Setting up local test repository..."
 TEST_DIR=$(mktemp -d)
@@ -400,57 +428,15 @@ cp "$PROJECT_ROOT/action.yml" .
 cp "$PROJECT_ROOT/update-pr-stack.sh" .
 cp "$PROJECT_ROOT/command_utils.sh" .
 
-# Create workflow file pointing to the local action
-echo >&2 "Creating workflow file..."
+# Copy workflow file from the repo and modify it to use local action
+echo >&2 "Copying workflow file from repo..."
 mkdir -p .github/workflows
-cat > .github/workflows/"$WORKFLOW_FILE" <<EOF
-name: Update Stacked PRs on Squash Merge (E2E Test)
-on:
-  pull_request:
-    types: [closed, synchronize]
-permissions:
-  contents: write
-  pull-requests: write
-jobs:
-  update-pr-stack:
-    # Only run on actual squash merges initiated by the test script
-    if: |
-      github.event.action == 'closed' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.merge_commit_sha != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # Fetch all history for all branches and tags
-          fetch-depth: 0
-          # Use a PAT token for checkout to allow pushing updates
-          token: \${{ secrets.GITHUB_TOKEN }}
-      - name: Update PR stack
-        # Use the action from the current repository checkout
-        uses: ./
-        with:
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-  continue-after-conflict-resolution:
-    # Run when a PR with the conflict label is updated (user pushed conflict resolution)
-    if: |
-      github.event.action == 'synchronize' &&
-      contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: \${{ secrets.GITHUB_TOKEN }}
-      - name: Continue PR stack update after conflict resolution
-        uses: ./
-        with:
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-          mode: conflict-resolved
-          pr-branch: \${{ github.event.pull_request.head.ref }}
-EOF
+cp "$PROJECT_ROOT/.github/workflows/$WORKFLOW_FILE" .github/workflows/
+
+# Replace the remote action reference with local action for testing
+# This ensures e2e tests validate the same workflow users would copy
+sed -i 's|uses: Phlogistique/autorestack-action@main|uses: ./|g' .github/workflows/"$WORKFLOW_FILE"
+echo >&2 "Modified workflow to use local action (./)"
 
 log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
