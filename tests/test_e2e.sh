@@ -422,23 +422,17 @@ log_cmd git add file.txt
 log_cmd git commit -m "Initial commit"
 INITIAL_COMMIT_SHA=$(git rev-parse HEAD)
 
-# Copy action files
-echo >&2 "Copying action files..."
-cp "$PROJECT_ROOT/action.yml" .
-cp "$PROJECT_ROOT/update-pr-stack.sh" .
-cp "$PROJECT_ROOT/command_utils.sh" .
-
-# Copy workflow file from the repo and modify it to use local action
+# Copy workflow file from the repo and modify it to use the current commit SHA
+# This tests the actual deployed action, not a local copy
 echo >&2 "Copying workflow file from repo..."
 mkdir -p .github/workflows
 cp "$PROJECT_ROOT/.github/workflows/$WORKFLOW_FILE" .github/workflows/
 
-# Replace the remote action reference with local action for testing
-# This ensures e2e tests validate the same workflow users would copy
-sed -i 's|uses: Phlogistique/autorestack-action@main|uses: ./|g' .github/workflows/"$WORKFLOW_FILE"
-echo >&2 "Modified workflow to use local action (./)"
+# Replace @main with the current commit SHA to test exactly what we pushed
+sed -i "s|uses: Phlogistique/autorestack-action@main|uses: Phlogistique/autorestack-action@$ACTION_REPO_COMMIT|g" .github/workflows/"$WORKFLOW_FILE"
+echo >&2 "Modified workflow to use action at commit $ACTION_REPO_COMMIT"
 
-log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
+log_cmd git add .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
 ACTION_COMMIT_SHA=$(git rev-parse HEAD)
 
