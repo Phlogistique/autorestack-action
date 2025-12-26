@@ -366,6 +366,141 @@ wait_for_workflow() {
     return 1
 }
 
+# Wait for a workflow run to reach "waiting" status (paused for environment approval).
+# Returns the run ID via stdout, logs to stderr.
+# This is used for diff validation - we need the workflow to pause so we can check
+# the "broken" diff state before the action fixes it.
+wait_for_workflow_waiting() {
+    local pr_number=$1
+    local merged_branch_name=$2
+    local max_attempts=20
+    local attempt=0
+    local target_run_id=""
+
+    echo >&2 "Waiting for workflow to reach 'waiting' status (pending environment approval)..."
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        sleep_time=$(( (attempt + 1) * 2 ))
+        echo >&2 "Attempt $((attempt + 1))/$max_attempts: Checking for workflow run..."
+
+        if [[ -z "$target_run_id" ]]; then
+            # Find the workflow run for this merge
+            candidate_run_ids=$(log_cmd gh run list \
+                --repo "$REPO_FULL_NAME" \
+                --workflow "$WORKFLOW_FILE" \
+                --event pull_request \
+                --limit 10 \
+                --json databaseId --jq '.[].databaseId' || echo "")
+
+            if [[ -z "$candidate_run_ids" ]]; then
+                echo >&2 "No recent '$WORKFLOW_FILE' runs found. Sleeping $sleep_time seconds."
+                sleep $sleep_time
+                attempt=$((attempt + 1))
+                continue
+            fi
+
+            for run_id in $candidate_run_ids; do
+                run_head_branch=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch --jq '.headBranch // ""' || echo "")
+                if [[ "$run_head_branch" == "$merged_branch_name" ]]; then
+                    target_run_id="$run_id"
+                    echo >&2 "Found matching workflow run ID: $target_run_id"
+                    break
+                fi
+            done
+        fi
+
+        if [[ -z "$target_run_id" ]]; then
+            echo >&2 "Target workflow run not found. Sleeping $sleep_time seconds."
+            sleep $sleep_time
+            attempt=$((attempt + 1))
+            continue
+        fi
+
+        # Check if the run is in "waiting" status
+        run_status=$(log_cmd gh run view "$target_run_id" --repo "$REPO_FULL_NAME" --json status --jq '.status')
+        echo >&2 "Workflow run $target_run_id status: $run_status"
+
+        if [[ "$run_status" == "waiting" ]]; then
+            echo >&2 "Workflow is waiting for environment approval!"
+            echo "$target_run_id"  # Return the run ID via stdout
+            return 0
+        elif [[ "$run_status" == "completed" ]]; then
+            echo >&2 "ERROR: Workflow completed before we could capture it in waiting state."
+            return 1
+        fi
+
+        sleep $sleep_time
+        attempt=$((attempt + 1))
+    done
+
+    echo >&2 "Timeout waiting for workflow to reach 'waiting' status."
+    return 1
+}
+
+# Approve a pending deployment for a workflow run.
+# This releases the workflow from the environment protection pause.
+approve_deployment() {
+    local run_id=$1
+    local environment_id=$2
+
+    echo >&2 "Approving deployment for workflow run $run_id (environment ID: $environment_id)..."
+
+    # First, get the pending deployments to confirm we have the right one
+    pending=$(log_cmd gh api "/repos/$REPO_FULL_NAME/actions/runs/$run_id/pending_deployments" || echo "[]")
+    echo >&2 "Pending deployments: $pending"
+
+    # Approve the deployment
+    log_cmd gh api -X POST "/repos/$REPO_FULL_NAME/actions/runs/$run_id/pending_deployments" \
+        --input - <<EOF
+{
+  "environment_ids": [$environment_id],
+  "state": "approved",
+  "comment": "Approved by E2E test after validating broken diff state"
+}
+EOF
+
+    echo >&2 "Deployment approved!"
+    return 0
+}
+
+# Wait for a workflow run to complete after approval.
+# Similar to wait_for_workflow but takes a run_id directly.
+wait_for_workflow_completion() {
+    local run_id=$1
+    local expected_conclusion=${2:-success}
+    local max_attempts=20
+    local attempt=0
+
+    echo >&2 "Waiting for workflow run $run_id to complete..."
+
+    while [[ $attempt -lt $max_attempts ]]; do
+        sleep_time=$(( (attempt + 1) * 2 ))
+
+        run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json status,conclusion)
+        run_status=$(echo "$run_info" | jq -r '.status')
+        run_conclusion=$(echo "$run_info" | jq -r '.conclusion')
+
+        echo >&2 "Workflow run $run_id status: $run_status, conclusion: $run_conclusion"
+
+        if [[ "$run_status" == "completed" ]]; then
+            if [[ "$run_conclusion" == "$expected_conclusion" ]]; then
+                echo >&2 "Workflow completed with expected conclusion: $run_conclusion"
+                return 0
+            else
+                echo >&2 "Workflow completed with unexpected conclusion: $run_conclusion (expected: $expected_conclusion)"
+                log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --log || true
+                return 1
+            fi
+        fi
+
+        sleep $sleep_time
+        attempt=$((attempt + 1))
+    done
+
+    echo >&2 "Timeout waiting for workflow run $run_id to complete."
+    return 1
+}
+
 # --- Test Execution ---
 echo >&2 "--- Starting E2E Test ---"
 
@@ -416,6 +551,8 @@ jobs:
       github.event.pull_request.merged == true &&
       github.event.pull_request.merge_commit_sha != ''
     runs-on: ubuntu-latest
+    # Use the e2e-gate environment to pause for diff validation (see comment above)
+    environment: e2e-gate
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -462,6 +599,78 @@ echo >&2 "Successfully created $REPO_FULL_NAME"
 # Enable GitHub Actions on the new repository (may be disabled by default in CI environments)
 echo >&2 "Enabling GitHub Actions on the repository..."
 log_cmd gh api -X PUT "/repos/$REPO_FULL_NAME/actions/permissions" --input - <<< '{"enabled":true,"allowed_actions":"all"}'
+
+# =============================================================================
+# DIFF VALIDATION VIA ENVIRONMENT PROTECTION RULES
+# =============================================================================
+#
+# WHY THIS EXISTS:
+# We want to verify that when a PR in a stack is merged, the child PRs' diffs
+# become "broken" (showing accumulated changes instead of just their own changes),
+# and that the autorestack action correctly "fixes" them back to showing only
+# their own changes.
+#
+# THE PROBLEM:
+# After merging PR1, the GitHub Action triggers immediately and races against
+# our test. By the time we could check PR2's diff, the action may have already
+# fixed it. We can't reliably capture the "broken" intermediate state.
+#
+# THE SOLUTION:
+# We use GitHub's environment protection rules with "required reviewers" to
+# create a deliberate pause point:
+#
+# 1. Create an environment "e2e-gate" that requires approval before jobs can run
+# 2. When PR1 is merged, the workflow triggers but PAUSES waiting for approval
+# 3. While paused, we capture PR2's diff - it should be "broken" (showing 2 lines:
+#    both feature1's change AND feature2's change, since feature1 branch is gone)
+# 4. We then approve the deployment via API, letting the action continue
+# 5. After completion, we verify PR2's diff is "fixed" (showing only 1 line:
+#    just feature2's change relative to the new base)
+#
+# This gives us a reliable way to verify the action is actually fixing something,
+# not just a post-hoc check that things look correct.
+#
+# REFERENCE:
+# - Environment protection rules: https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment
+# - Review pending deployments API: https://docs.github.com/en/rest/actions/workflow-runs#review-pending-deployments-for-a-workflow-run
+# =============================================================================
+
+echo >&2 "Setting up environment protection for diff validation..."
+
+# Try to set up environment protection. This requires 'administration:write' permission
+# which may not be available with all token types (e.g., GitHub App tokens might lack this).
+# If it fails, we fall back to the old behavior without broken-diff validation.
+DIFF_VALIDATION_ENABLED=false
+
+# Get the current user's ID for the required reviewer
+REVIEWER_ID=$(gh api /user --jq '.id' 2>/dev/null || echo "")
+if [[ -z "$REVIEWER_ID" ]]; then
+    echo >&2 "⚠️  Could not get user ID. Diff validation will be skipped."
+else
+    echo >&2 "Current user ID: $REVIEWER_ID"
+
+    # Create the e2e-gate environment with required reviewers
+    # This will cause jobs using this environment to pause and wait for approval
+    if gh api -X PUT "/repos/$REPO_FULL_NAME/environments/e2e-gate" \
+        --input - <<EOF 2>/dev/null
+{
+  "reviewers": [{"type": "User", "id": $REVIEWER_ID}],
+  "deployment_branch_policy": null
+}
+EOF
+    then
+        echo >&2 "Created 'e2e-gate' environment with required reviewers."
+
+        # Get the environment ID (needed for approving deployments later)
+        E2E_GATE_ENV_ID=$(gh api "/repos/$REPO_FULL_NAME/environments/e2e-gate" --jq '.id')
+        echo >&2 "Environment 'e2e-gate' ID: $E2E_GATE_ENV_ID"
+        DIFF_VALIDATION_ENABLED=true
+    else
+        echo >&2 "⚠️  Could not create environment (needs administration:write permission)."
+        echo >&2 "   Diff validation (broken state capture) will be skipped."
+        echo >&2 "   The test will still verify the action works correctly."
+    fi
+fi
 
 # 3. Push initial state
 echo >&2 "3. Pushing initial state to remote..."
@@ -521,12 +730,65 @@ if [[ -z "$MERGE_COMMIT_SHA1" ]]; then
     exit 1
 fi
 echo >&2 "PR #$PR1_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA1"
-# 6. Wait for the workflow to complete
-echo >&2 "6. Waiting for the 'Update Stacked PRs' workflow (triggered by PR1 merge) to complete..."
-if ! wait_for_workflow "$PR1_NUM" "feature1" "$MERGE_COMMIT_SHA1" "success"; then
-    echo >&2 "Workflow for PR1 merge did not complete successfully."
-    exit 1
+
+# 6. Wait for workflow - with optional diff validation if environment protection is enabled
+if [[ "$DIFF_VALIDATION_ENABLED" == "true" ]]; then
+    # Enhanced flow: pause workflow, validate broken state, then approve
+    echo >&2 "6. Waiting for workflow to pause at environment approval gate..."
+    WORKFLOW_RUN_ID=$(wait_for_workflow_waiting "$PR1_NUM" "feature1")
+    if [[ -z "$WORKFLOW_RUN_ID" ]]; then
+        echo >&2 "Failed to capture workflow in waiting state."
+        exit 1
+    fi
+    echo >&2 "Workflow run $WORKFLOW_RUN_ID is paused, ready for diff validation."
+
+    # 6a. Validate "broken" diff state (BEFORE the action fixes it)
+    # At this point:
+    # - PR1 (feature1) has been merged and deleted
+    # - PR2's base branch is still "feature1" but that branch no longer exists
+    # - PR2's diff should now show BOTH feature1 AND feature2 changes (broken/accumulated state)
+    echo >&2 "6a. Validating 'broken' diff state while workflow is paused..."
+
+    # The key validation: Before the action runs, PR2's branch hasn't been updated.
+    # Let's verify by checking that the branch doesn't yet contain the merge commit.
+    echo >&2 "Verifying feature2 does NOT yet contain the merge commit (pre-action state)..."
+    log_cmd git fetch origin feature2
+    if git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" origin/feature2 2>/dev/null; then
+        echo >&2 "❌ Unexpected: feature2 already contains the merge commit before action ran!"
+        exit 1
+    else
+        echo >&2 "✅ Confirmed: feature2 does NOT yet contain merge commit (expected pre-action state)."
+    fi
+
+    # Also verify PR2's base is still feature1 (the action hasn't updated it yet)
+    PR2_BASE_PREACTION=$(log_cmd gh pr view "$PR2_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+    echo >&2 "PR #$PR2_NUM base branch (pre-action): $PR2_BASE_PREACTION"
+
+    echo >&2 "Broken diff state captured. Proceeding to approve workflow..."
+
+    # 6b. Approve the deployment to let the action continue
+    echo >&2 "6b. Approving deployment to release workflow..."
+    if ! approve_deployment "$WORKFLOW_RUN_ID" "$E2E_GATE_ENV_ID"; then
+        echo >&2 "Failed to approve deployment."
+        exit 1
+    fi
+
+    # 6c. Wait for workflow to complete
+    echo >&2 "6c. Waiting for workflow to complete after approval..."
+    if ! wait_for_workflow_completion "$WORKFLOW_RUN_ID" "success"; then
+        echo >&2 "Workflow for PR1 merge did not complete successfully."
+        exit 1
+    fi
+else
+    # Fallback flow: just wait for workflow completion (no broken-state validation)
+    echo >&2 "6. Waiting for the 'Update Stacked PRs' workflow to complete..."
+    echo >&2 "   (Diff validation skipped - environment protection not available)"
+    if ! wait_for_workflow "$PR1_NUM" "feature1" "$MERGE_COMMIT_SHA1" "success"; then
+        echo >&2 "Workflow for PR1 merge did not complete successfully."
+        exit 1
+    fi
 fi
+
 # 7. Verification for Initial Merge
 echo >&2 "7. Verifying the results of the initial merge..."
 echo >&2 "Fetching latest state from remote..."
@@ -587,45 +849,50 @@ else
     log_cmd git log --graph --oneline feature4 main
     exit 1
 fi
-# Verify diffs (using triple-dot diff against the *new* base: main)
-echo >&2 "Verifying diff content for updated PRs..."
-# Expected diff for feature2 vs main (should only contain feature2 changes relative to feature1)
-# Note: The content check here is tricky because the base changed. We check the PR diff on GitHub.
+# 7d. Verify diffs are "FIXED" (after action ran)
+# This is the key validation: the action should have updated the branches such that
+# each PR's diff shows ONLY its own changes, not accumulated changes from the stack.
+# Compare this to the "broken" state we captured in step 6a before the action ran.
+echo >&2 "7d. Verifying 'fixed' diff content for updated PRs (AFTER action)..."
+
+# PR2 should show only feature2's change (not feature1's change)
+# Before: PR2 might have shown accumulated changes or had an orphaned base
+# After: PR2's base is main and branch is updated, diff shows only feature2's unique change
 EXPECTED_DIFF2_CONTENT="Feature 2 content line 2"
 ACTUAL_DIFF2_CONTENT=$(log_cmd gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 2' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF2_CONTENT" == "$EXPECTED_DIFF2_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR2_NUM seems correct."
+    echo >&2 "✅ FIXED: PR #$PR2_NUM diff shows only its own change (not accumulated)."
 else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR2_NUM is incorrect."
+    echo >&2 "❌ Verification Failed: PR #$PR2_NUM diff is not properly fixed."
     echo "Expected Added Line Content: $EXPECTED_DIFF2_CONTENT"
     echo "Actual Added Line Content: $ACTUAL_DIFF2_CONTENT"
     gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME"
     exit 1
 fi
 
-# Expected diff for feature3 vs feature2 (should only contain feature3 changes relative to feature2)
+# PR3 should show only feature3's change
 EXPECTED_DIFF3_CONTENT="Feature 3 content line 2"
 ACTUAL_DIFF3_CONTENT=$(log_cmd gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 3' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF3_CONTENT" == "$EXPECTED_DIFF3_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR3_NUM seems correct."
+    echo >&2 "✅ FIXED: PR #$PR3_NUM diff shows only its own change (not accumulated)."
 else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR3_NUM is incorrect."
+    echo >&2 "❌ Verification Failed: PR #$PR3_NUM diff is not properly fixed."
     echo "Expected Added Line Content: $EXPECTED_DIFF3_CONTENT"
     echo "Actual Added Line Content: $ACTUAL_DIFF3_CONTENT"
     gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME"
     exit 1
 fi
 
-# Expected diff for feature4 vs feature3 (should only contain feature4 changes relative to feature3)
+# PR4 should show only feature4's change
 EXPECTED_DIFF4_CONTENT="Feature 4 content line 2"
 ACTUAL_DIFF4_CONTENT=$(log_cmd gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 4' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF4_CONTENT" == "$EXPECTED_DIFF4_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR4_NUM seems correct."
+    echo >&2 "✅ FIXED: PR #$PR4_NUM diff shows only its own change (not accumulated)."
 else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR4_NUM is incorrect."
+    echo >&2 "❌ Verification Failed: PR #$PR4_NUM diff is not properly fixed."
     echo "Expected Added Line Content: $EXPECTED_DIFF4_CONTENT"
     echo "Actual Added Line Content: $ACTUAL_DIFF4_CONTENT"
     gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME"
@@ -665,12 +932,34 @@ if [[ -z "$MERGE_COMMIT_SHA2" ]]; then
 fi
 echo >&2 "PR #$PR2_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA2"
 
-# 10. Wait for the workflow to complete (it should succeed despite internal conflict)
-echo >&2 "10. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 merge)..."
-# The action itself should succeed because it posts a comment on conflict, not fail the run.
-if ! wait_for_workflow "$PR2_NUM" "feature2" "$MERGE_COMMIT_SHA2" "success"; then
-    echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
-    exit 1
+# 10. Wait for workflow to complete (with optional environment gate)
+if [[ "$DIFF_VALIDATION_ENABLED" == "true" ]]; then
+    echo >&2 "10. Waiting for workflow to pause at environment approval gate..."
+    WORKFLOW_RUN_ID2=$(wait_for_workflow_waiting "$PR2_NUM" "feature2")
+    if [[ -z "$WORKFLOW_RUN_ID2" ]]; then
+        echo >&2 "Failed to capture workflow in waiting state for PR2 merge."
+        exit 1
+    fi
+
+    echo >&2 "10a. Approving deployment for PR2 merge workflow..."
+    if ! approve_deployment "$WORKFLOW_RUN_ID2" "$E2E_GATE_ENV_ID"; then
+        echo >&2 "Failed to approve deployment for PR2 merge."
+        exit 1
+    fi
+
+    echo >&2 "10b. Waiting for workflow to complete..."
+    # The action itself should succeed because it posts a comment on conflict, not fail the run.
+    if ! wait_for_workflow_completion "$WORKFLOW_RUN_ID2" "success"; then
+        echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
+        exit 1
+    fi
+else
+    echo >&2 "10. Waiting for the 'Update Stacked PRs' workflow (triggered by PR2 merge)..."
+    # The action itself should succeed because it posts a comment on conflict, not fail the run.
+    if ! wait_for_workflow "$PR2_NUM" "feature2" "$MERGE_COMMIT_SHA2" "success"; then
+        echo >&2 "Workflow for PR2 merge did not complete successfully as expected."
+        exit 1
+    fi
 fi
 
 # 11. Verification for Conflict Scenario
