@@ -41,7 +41,7 @@ runs:
         if [[ "$EVENT_ACTION" == "closed" && "$PR_MERGED" == "true" && -n "$MERGE_COMMIT_SHA" ]]; then
           echo "Detected squash-merge mode"
           export ACTION_MODE="squash-merge"
-        elif [[ "$EVENT_ACTION" == "synchronize" && "$PR_LABELS" == *"autorestack-needs-conflict-resolution"* ]]; then
+        elif [[ "$EVENT_ACTION" == "synchronize" && "$PR_LABELS" == *autorestack-needs-conflict-resolution* ]]; then
           echo "Detected conflict-resolved mode"
           export ACTION_MODE="conflict-resolved"
         else

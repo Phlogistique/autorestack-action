@@ -210,16 +210,14 @@ wait_for_synchronize_workflow() {
             echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
             for run_id in $candidate_run_ids; do
                 echo >&2 "Checking candidate run ID: $run_id"
-                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,jobs || echo "{}")
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch || echo "{}")
 
                 run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
-                # Check if this run has the continue-after-conflict-resolution job
-                has_continue_job=$(echo "$run_info" | jq -r '.jobs[] | select(.name == "continue-after-conflict-resolution") | .name' || echo "")
 
-                echo >&2 "  Run head branch: $run_head_branch, has continue job: $has_continue_job"
+                echo >&2 "  Run head branch: $run_head_branch"
 
-                if [[ "$run_head_branch" == "$branch_name" && -n "$has_continue_job" ]]; then
-                    echo >&2 "Found matching workflow run ID: $run_id (synchronize with continue job)"
+                if [[ "$run_head_branch" == "$branch_name" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (branch matches)"
                     target_run_id="$run_id"
                     break
                 fi
