@@ -564,15 +564,24 @@ echo >&2 "0d. Merging NoAct PR1 (without action installed)..."
 merge_pr_with_retry "$NOACT_PR1_URL"
 echo >&2 "NoAct PR1 merged. Branch should be auto-deleted and PR2 auto-retargeted."
 
-# Debug: Check if the branch was actually deleted
-echo >&2 "Checking if noact_feature1 branch was deleted..."
-if gh api "/repos/$REPO_FULL_NAME/branches/noact_feature1" &>/dev/null; then
-    echo >&2 "❌ Branch noact_feature1 still exists! Auto-delete may not have worked."
+# Wait for GitHub to delete the branch (async operation)
+echo >&2 "Waiting for noact_feature1 branch to be deleted..."
+branch_deleted=false
+for attempt in {1..10}; do
+    if ! gh api "/repos/$REPO_FULL_NAME/branches/noact_feature1" &>/dev/null; then
+        echo >&2 "✅ Branch noact_feature1 was deleted (attempt $attempt)."
+        branch_deleted=true
+        break
+    fi
+    echo >&2 "Attempt $attempt/10: Branch still exists, waiting..."
+    sleep 2
+done
+
+if [[ "$branch_deleted" != "true" ]]; then
+    echo >&2 "❌ Branch noact_feature1 still exists after 10 attempts!"
     echo >&2 "Repo settings:"
     gh api "/repos/$REPO_FULL_NAME" --jq '{delete_branch_on_merge}' >&2
     exit 1
-else
-    echo >&2 "✅ Branch noact_feature1 was deleted."
 fi
 
 # Wait for GitHub to auto-retarget PR2 to main
