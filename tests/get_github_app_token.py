@@ -132,36 +132,7 @@ def generate_installation_token():
         print("Error: No installations found for this GitHub App", file=sys.stderr)
         sys.exit(1)
 
-    installation_id_env = os.getenv("GH_APP_INSTALLATION_ID")
-    if installation_id_env:
-        try:
-            desired_id = int(installation_id_env)
-        except ValueError:
-            print("Error: GH_APP_INSTALLATION_ID must be an integer", file=sys.stderr)
-            sys.exit(1)
-        installation = next((i for i in installations if i.get("id") == desired_id), None)
-        if not installation:
-            available_ids = [i.get("id") for i in installations if "id" in i]
-            print(
-                f"Error: GH_APP_INSTALLATION_ID {desired_id} not found. "
-                f"Available installation IDs: {available_ids}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-    else:
-        installation = installations[0]
-        available = ", ".join(
-            f"{i.get('id')}:{i.get('account', {}).get('login', 'unknown')}"
-            for i in installations
-        )
-        print(f"Available installations: {available}", file=sys.stderr)
-
-    installation_id = installation["id"]
-    account_login = installation.get("account", {}).get("login", "unknown")
-    print(
-        f"Using installation id {installation_id} (account {account_login})",
-        file=sys.stderr,
-    )
+    installation_id = installations[0]['id']
 
     # Create installation token
     url = f"https://api.github.com/app/installations/{installation_id}/access_tokens"
