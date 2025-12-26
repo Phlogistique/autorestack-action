@@ -58,12 +58,13 @@
 #   - Does NOT push any conflicted state to the remote
 #   - Posts a comment on PR3 explaining the conflict
 #   - Adds a label "autorestack-needs-conflict-resolution" to PR3
-#   - Updates PR3's base branch to main (even though merge failed)
+#   - Does NOT update PR3's base branch (keeps it as feature2 for readable diff)
+#   - Does NOT delete feature2 branch (still referenced by conflicted PR)
 #   - Exits with success (conflict is handled gracefully, not a failure)
 #
 # Verifications:
-#   - feature2 branch is deleted from remote
-#   - PR3 base branch is updated to main
+#   - feature2 branch is NOT deleted from remote (still referenced by conflicted PR3)
+#   - PR3 base branch stays as feature2 (not updated to main)
 #   - Conflict comment exists on PR3
 #   - Conflict label "autorestack-needs-conflict-resolution" exists on PR3
 #   - feature3 branch was NOT updated (still at pre-conflict SHA)
@@ -74,8 +75,10 @@
 #   - Push the resolved branch
 #   - The push triggers the 'synchronize' event on PR3
 #   - The action detects the conflict label and removes it
+#   - Updates PR3's base branch to main
+#   - Deletes feature2 branch (no other conflicted PRs depend on it)
 #   - The continuation workflow updates feature4 (grandchild) recursively
-#   - Verify the label is removed, resolution comment is posted, and feature4 is updated
+#   - Verify the label is removed, base updated, branch deleted, and feature4 is updated
 #
 # Grandchild Update (feature4):
 #   - Tests that update_branch_recursive properly handles grandchildren
@@ -676,23 +679,23 @@ fi
 # 11. Verification for Conflict Scenario
 echo >&2 "11. Verifying the results of the conflict scenario..."
 echo >&2 "Fetching latest state from remote..."
-log_cmd git fetch origin --prune # Prune deleted branch feature2
+log_cmd git fetch origin --prune
 
-# Verify feature2 branch was deleted remotely
+# Verify feature2 branch was NOT deleted (still referenced by conflicted PR3)
 if git show-ref --verify --quiet refs/remotes/origin/feature2; then
-    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature2' still exists after merge."
-    exit 1
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature2' still exists (kept for conflicted PR)."
 else
-    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature2' was deleted."
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature2' was deleted prematurely."
+    exit 1
 fi
 
-# Verify PR3 base branch was updated to main (action updates base even on conflict)
+# Verify PR3 base branch was NOT updated (stays as feature2 for readable diff)
 echo >&2 "Checking PR #$PR3_NUM base branch..."
 PR3_BASE_AFTER_CONFLICT=$(log_cmd gh pr view "$PR3_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
-if [[ "$PR3_BASE_AFTER_CONFLICT" == "main" ]]; then
-    echo >&2 "✅ Verification Passed: PR #$PR3_NUM base branch updated to 'main'."
+if [[ "$PR3_BASE_AFTER_CONFLICT" == "feature2" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR3_NUM base branch stays as 'feature2' (not updated during conflict)."
 else
-    echo >&2 "❌ Verification Failed: PR #$PR3_NUM base branch is '$PR3_BASE_AFTER_CONFLICT', expected 'main'."
+    echo >&2 "❌ Verification Failed: PR #$PR3_NUM base branch is '$PR3_BASE_AFTER_CONFLICT', expected 'feature2'."
     exit 1
 fi
 
@@ -789,17 +792,24 @@ else
     exit 1
 fi
 
-# Verify resolution acknowledgement comment exists on PR3
-echo >&2 "Checking for resolution acknowledgement comment on PR #$PR3_NUM..."
-RESOLUTION_COMMENT=$(log_cmd gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[] | select(.body | contains("Conflict resolved")) | .body')
-if [[ -n "$RESOLUTION_COMMENT" ]]; then
-    echo >&2 "✅ Verification Passed: Resolution acknowledgement comment found on PR #$PR3_NUM."
+# Verify PR3 base branch was updated to main after resolution
+echo >&2 "Checking PR #$PR3_NUM base branch after resolution..."
+PR3_BASE_AFTER_RESOLUTION=$(log_cmd gh pr view "$PR3_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+if [[ "$PR3_BASE_AFTER_RESOLUTION" == "main" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR3_NUM base branch updated to 'main' after resolution."
 else
-    echo >&2 "❌ Verification Failed: Resolution acknowledgement comment not found on PR #$PR3_NUM."
-    echo >&2 "--- Comments on PR #$PR3_NUM ---"
-    gh pr view "$PR3_URL" --repo "$REPO_FULL_NAME" --json comments --jq '.comments[].body' || echo "Failed to get comments"
-    echo >&2 "-----------------------------"
+    echo >&2 "❌ Verification Failed: PR #$PR3_NUM base branch is '$PR3_BASE_AFTER_RESOLUTION', expected 'main'."
     exit 1
+fi
+
+# Verify feature2 was deleted after resolution (no other conflicted PRs depend on it)
+echo >&2 "Checking that feature2 branch was deleted after resolution..."
+log_cmd git fetch origin --prune
+if git show-ref --verify --quiet refs/remotes/origin/feature2; then
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature2' still exists after resolution."
+    exit 1
+else
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature2' was deleted after resolution."
 fi
 
 echo >&2 "--- Continuation Workflow Test Completed Successfully ---"
@@ -861,6 +871,227 @@ else
 fi
 
 echo >&2 "--- Conflict Scenario Test Completed Successfully ---"
+
+
+# --- SCENARIO 3: Sibling Conflicts (Multiple PRs from same base, both conflict) ---
+# ===================================================================================
+# Tests that the old base branch is kept until ALL sibling PRs resolve their conflicts.
+#
+# Setup:
+#   - Create a new stack: main <- feature5 <- (feature6, feature7) parallel children
+#   - feature6 and feature7 both modify line 5 of file.txt
+#   - main modifies line 5 differently (creating conflict with both siblings)
+#
+# Expected Behavior:
+#   - After merging feature5, both feature6 and feature7 have conflicts
+#   - feature5 branch is kept (referenced by both conflicted PRs)
+#   - After resolving feature6, feature5 is still kept (feature7 still conflicted)
+#   - After resolving feature7, feature5 is deleted (no more conflicted siblings)
+# ===================================================================================
+
+echo >&2 "--- Testing Sibling Conflicts Scenario ---"
+
+# 16. Create new stack for sibling conflict test
+echo >&2 "16. Creating new stack for sibling conflict test..."
+log_cmd git checkout main
+log_cmd git pull origin main
+
+# Create feature5 based on main (modifies line 2, no conflict with line 5)
+log_cmd git checkout -b feature5 main
+sed -i '2s/.*/Feature 5 content line 2/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 5"
+log_cmd git push origin feature5
+PR5_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base main --head feature5 --title "Feature 5" --body "This is PR 5")
+PR5_NUM=$(echo "$PR5_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created PR #$PR5_NUM: $PR5_URL"
+
+# Create feature6 based on feature5 (modifies line 5, will conflict with main)
+log_cmd git checkout -b feature6 feature5
+sed -i '5s/.*/Feature 6 conflicting content line 5/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 6 (modifies line 5)"
+log_cmd git push origin feature6
+PR6_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature5 --head feature6 --title "Feature 6" --body "This is PR 6, sibling of PR 7")
+PR6_NUM=$(echo "$PR6_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created PR #$PR6_NUM: $PR6_URL"
+
+# Create feature7 based on feature5 (also modifies line 5, will conflict with main)
+log_cmd git checkout feature5
+log_cmd git checkout -b feature7
+sed -i '5s/.*/Feature 7 conflicting content line 5/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Add feature 7 (also modifies line 5)"
+log_cmd git push origin feature7
+PR7_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature5 --head feature7 --title "Feature 7" --body "This is PR 7, sibling of PR 6")
+PR7_NUM=$(echo "$PR7_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created PR #$PR7_NUM: $PR7_URL"
+
+# Introduce conflicting change on main (line 5) - this will conflict with feature6/7
+# when the action tries to merge SQUASH_COMMIT~ into them
+log_cmd git checkout main
+sed -i '5s/.*/Main conflicting content line 5/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Add conflicting change on main line 5"
+log_cmd git push origin main
+
+# 17. Merge feature5 to trigger conflicts on both siblings
+echo >&2 "17. Squash merging PR #$PR5_NUM (feature5) to trigger sibling conflicts..."
+merge_pr_with_retry "$PR5_URL"
+MERGE_COMMIT_SHA5=$(gh pr view "$PR5_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
+echo >&2 "PR #$PR5_NUM merged. Squash commit SHA: $MERGE_COMMIT_SHA5"
+
+# Wait for workflow
+echo >&2 "Waiting for workflow..."
+if ! wait_for_workflow "$PR5_NUM" "feature5" "$MERGE_COMMIT_SHA5" "success"; then
+    echo >&2 "Workflow for PR5 merge did not complete successfully."
+    exit 1
+fi
+
+# 18. Verify both siblings have conflicts and feature5 is kept
+echo >&2 "18. Verifying sibling conflict state..."
+log_cmd git fetch origin
+
+# Verify feature5 branch was NOT deleted (both siblings conflicted)
+if git show-ref --verify --quiet refs/remotes/origin/feature5; then
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature5' still exists (kept for conflicted siblings)."
+else
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature5' was deleted prematurely."
+    exit 1
+fi
+
+# Verify both PRs have conflict labels
+PR6_HAS_LABEL=$(gh pr view "$PR6_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+PR7_HAS_LABEL=$(gh pr view "$PR7_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+
+if [[ "$PR6_HAS_LABEL" == "autorestack-needs-conflict-resolution" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR6_NUM has conflict label."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR6_NUM does not have conflict label."
+    exit 1
+fi
+
+if [[ "$PR7_HAS_LABEL" == "autorestack-needs-conflict-resolution" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR7_NUM has conflict label."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR7_NUM does not have conflict label."
+    exit 1
+fi
+
+# Verify both PRs still have feature5 as base
+PR6_BASE=$(gh pr view "$PR6_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+PR7_BASE=$(gh pr view "$PR7_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+
+if [[ "$PR6_BASE" == "feature5" && "$PR7_BASE" == "feature5" ]]; then
+    echo >&2 "✅ Verification Passed: Both sibling PRs still have 'feature5' as base."
+else
+    echo >&2 "❌ Verification Failed: PR6 base is '$PR6_BASE', PR7 base is '$PR7_BASE', expected both to be 'feature5'."
+    exit 1
+fi
+
+# 19. Resolve first sibling (feature6) - feature5 should still be kept
+echo >&2 "19. Resolving first sibling (feature6)..."
+log_cmd git checkout feature6
+log_cmd git fetch origin
+if git merge origin/main; then
+    echo >&2 "Merge succeeded unexpectedly (no conflict?)"
+else
+    echo >&2 "Resolving conflict on feature6..."
+    log_cmd git checkout --ours file.txt
+    log_cmd git add file.txt
+    log_cmd git commit --no-edit
+fi
+log_cmd git push origin feature6
+
+# Wait for continuation workflow
+echo >&2 "Waiting for continuation workflow for feature6..."
+if ! wait_for_synchronize_workflow "$PR6_NUM" "feature6" "success"; then
+    echo >&2 "Continuation workflow for feature6 did not complete successfully."
+    exit 1
+fi
+
+# 20. Verify feature5 is still kept (feature7 still conflicted)
+echo >&2 "20. Verifying feature5 is still kept after first sibling resolution..."
+log_cmd git fetch origin
+
+# feature5 should still exist
+if git show-ref --verify --quiet refs/remotes/origin/feature5; then
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature5' still exists (feature7 still conflicted)."
+else
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature5' was deleted prematurely (feature7 still needs it)."
+    exit 1
+fi
+
+# PR6 base should now be main
+PR6_BASE_AFTER=$(gh pr view "$PR6_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+if [[ "$PR6_BASE_AFTER" == "main" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR6_NUM base updated to 'main' after resolution."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR6_NUM base is '$PR6_BASE_AFTER', expected 'main'."
+    exit 1
+fi
+
+# PR6 should no longer have conflict label
+PR6_LABEL_AFTER=$(gh pr view "$PR6_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+if [[ -z "$PR6_LABEL_AFTER" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR6_NUM conflict label removed."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR6_NUM still has conflict label."
+    exit 1
+fi
+
+# PR7 should still have conflict label and feature5 as base
+PR7_LABEL_STILL=$(gh pr view "$PR7_URL" --repo "$REPO_FULL_NAME" --json labels --jq '.labels[] | select(.name == "autorestack-needs-conflict-resolution") | .name')
+PR7_BASE_STILL=$(gh pr view "$PR7_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+if [[ "$PR7_LABEL_STILL" == "autorestack-needs-conflict-resolution" && "$PR7_BASE_STILL" == "feature5" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR7_NUM still has conflict label and 'feature5' base."
+else
+    echo >&2 "❌ Verification Failed: PR7 label='$PR7_LABEL_STILL', base='$PR7_BASE_STILL'."
+    exit 1
+fi
+
+# 21. Resolve second sibling (feature7) - now feature5 should be deleted
+echo >&2 "21. Resolving second sibling (feature7)..."
+log_cmd git checkout feature7
+log_cmd git fetch origin
+if git merge origin/main; then
+    echo >&2 "Merge succeeded unexpectedly (no conflict?)"
+else
+    echo >&2 "Resolving conflict on feature7..."
+    log_cmd git checkout --ours file.txt
+    log_cmd git add file.txt
+    log_cmd git commit --no-edit
+fi
+log_cmd git push origin feature7
+
+# Wait for continuation workflow
+echo >&2 "Waiting for continuation workflow for feature7..."
+if ! wait_for_synchronize_workflow "$PR7_NUM" "feature7" "success"; then
+    echo >&2 "Continuation workflow for feature7 did not complete successfully."
+    exit 1
+fi
+
+# 22. Verify feature5 is now deleted (all siblings resolved)
+echo >&2 "22. Verifying feature5 is deleted after all siblings resolved..."
+log_cmd git fetch origin --prune
+
+if git show-ref --verify --quiet refs/remotes/origin/feature5; then
+    echo >&2 "❌ Verification Failed: Remote branch 'origin/feature5' still exists after all siblings resolved."
+    exit 1
+else
+    echo >&2 "✅ Verification Passed: Remote branch 'origin/feature5' was deleted after all siblings resolved."
+fi
+
+# PR7 base should now be main
+PR7_BASE_FINAL=$(gh pr view "$PR7_NUM" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+if [[ "$PR7_BASE_FINAL" == "main" ]]; then
+    echo >&2 "✅ Verification Passed: PR #$PR7_NUM base updated to 'main' after resolution."
+else
+    echo >&2 "❌ Verification Failed: PR #$PR7_NUM base is '$PR7_BASE_FINAL', expected 'main'."
+    exit 1
+fi
+
+echo >&2 "--- Sibling Conflicts Scenario Test Completed Successfully ---"
 
 
 # --- Test Succeeded ---

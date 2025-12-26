@@ -29,14 +29,16 @@ When a merge conflict occurs during the automatic update:
 
 1. The action posts a comment on the affected PR with instructions for manual resolution
 2. Adds a `autorestack-needs-conflict-resolution` label to the PR
-3. Updates the PR's base branch (but doesn't push the conflicted state)
+3. Keeps the PR's base branch unchanged (so the diff stays readable)
+4. Keeps the merged branch around (so you can reference it during resolution)
 
 After you manually resolve the conflict and push:
 
 1. The push triggers the `synchronize` event
 2. The action detects the conflict label and removes it
-3. Posts a confirmation comment
-4. Continues updating any dependent PRs in the stack
+3. Updates the PR's base branch to trunk
+4. Deletes the old base branch (if no other conflicted PRs still depend on it)
+5. Continues updating any dependent PRs in the stack
 
 ---
 

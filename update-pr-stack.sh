@@ -164,6 +164,25 @@ pr_has_conflict_label() {
     echo "$LABELS" | grep -q "^${CONFLICT_LABEL}$"
 }
 
+# Check if any other PRs with conflict label still depend on a given base branch
+# Returns 0 (true) if siblings exist, 1 (false) if no siblings
+has_sibling_conflicts() {
+    local BASE_BRANCH="$1"
+    local EXCLUDE_BRANCH="$2"
+
+    # Find all open PRs with the conflict label that are based on BASE_BRANCH
+    local CONFLICTED_SIBLINGS
+    CONFLICTED_SIBLINGS=$(gh pr list --base "$BASE_BRANCH" --label "$CONFLICT_LABEL" --json headRefName --jq '.[].headRefName' 2>/dev/null || echo "")
+
+    for SIBLING in $CONFLICTED_SIBLINGS; do
+        if [[ "$SIBLING" != "$EXCLUDE_BRANCH" ]]; then
+            return 0  # Found a sibling still in conflict
+        fi
+    done
+
+    return 1  # No siblings with same base
+}
+
 # Continue processing after user manually resolved conflicts
 continue_after_resolution() {
     check_env_var "PR_BRANCH"
@@ -178,11 +197,35 @@ continue_after_resolution() {
 
     echo "Found conflict label on $PR_BRANCH, continuing stack update..."
 
-    # Remove the conflict label
-    log_cmd gh pr edit "$PR_BRANCH" --remove-label "$CONFLICT_LABEL"
+    # Get the current base branch (the old base that was kept during conflict)
+    local OLD_BASE
+    OLD_BASE=$(gh pr view "$PR_BRANCH" --json baseRefName --jq '.baseRefName')
+    echo "Current base branch: $OLD_BASE"
 
-    # Post a comment acknowledging the resolution
-    echo "✅ Conflict resolved! Continuing to update dependent PRs..." | log_cmd gh pr comment "$PR_BRANCH" -F -
+    # Find where the old base was merged to (the new target)
+    local NEW_TARGET
+    NEW_TARGET=$(gh pr list --head "$OLD_BASE" --state merged --json baseRefName --jq '.[0].baseRefName')
+
+    if [[ -z "$NEW_TARGET" ]]; then
+        echo "⚠️ Could not find where '$OLD_BASE' was merged to; skipping base branch and deletion updates"
+        # Don't update base or delete old branch - leave things as they are
+    else
+        echo "Old base '$OLD_BASE' was merged to '$NEW_TARGET'"
+
+        # Remove the conflict label
+        log_cmd gh pr edit "$PR_BRANCH" --remove-label "$CONFLICT_LABEL"
+
+        # Update the PR's base branch to the new target
+        log_cmd gh pr edit "$PR_BRANCH" --base "$NEW_TARGET"
+
+        # Check if old base branch should be deleted
+        if has_sibling_conflicts "$OLD_BASE" "$PR_BRANCH"; then
+            echo "⚠️ Keeping branch '$OLD_BASE' - still referenced by other conflicted PRs"
+        else
+            echo "Deleting old base branch '$OLD_BASE' (no other PRs depend on it)"
+            log_cmd git push origin ":$OLD_BASE" || echo "⚠️ Could not delete '$OLD_BASE' (may already be deleted)"
+        fi
+    fi
 
     # Find and update child PRs (PRs based on this branch)
     CHILD_BRANCHES=$(log_cmd gh pr list --base "$PR_BRANCH" --json headRefName --jq '.[].headRefName')
@@ -242,21 +285,36 @@ main() {
     # Find all PRs directly targeting the merged PR's head
     INITIAL_TARGETS=($(log_cmd gh pr list --base "$MERGED_BRANCH" --json headRefName --jq '.[].headRefName'))
 
+    # Track successfully updated vs conflicted branches separately
+    UPDATED_TARGETS=()
+    CONFLICTED_TARGETS=()
+
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
         if update_direct_target "$BRANCH" "$TARGET_BRANCH"; then
+            UPDATED_TARGETS+=("$BRANCH")
             update_branch_recursive "$BRANCH"
         else
+            CONFLICTED_TARGETS+=("$BRANCH")
             echo "⚠️ Skipping descendants of $BRANCH until conflicts are resolved"
         fi
     done
 
-    # Update base branches for direct target PRs
-    for BRANCH in "${INITIAL_TARGETS[@]}"; do
+    # Only update base branches for successfully updated PRs
+    for BRANCH in "${UPDATED_TARGETS[@]}"; do
         log_cmd gh pr edit "$BRANCH" --base "$TARGET_BRANCH"
     done
 
-    # Push all updated branches and delete the merged branch
-    log_cmd git push origin ":$MERGED_BRANCH" "${INITIAL_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+    # Push updated branches; only delete merged branch if no conflicts
+    if [[ "${#CONFLICTED_TARGETS[@]}" -eq 0 ]]; then
+        # No conflicts - safe to delete merged branch
+        log_cmd git push origin ":$MERGED_BRANCH" "${UPDATED_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+    else
+        # Some conflicts - keep merged branch for reference during manual resolution
+        if [[ "${#UPDATED_TARGETS[@]}" -gt 0 || "${#ALL_CHILDREN[@]}" -gt 0 ]]; then
+            log_cmd git push origin "${UPDATED_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+        fi
+        echo "⚠️ Keeping branch '$MERGED_BRANCH' - still referenced by conflicted PRs: ${CONFLICTED_TARGETS[*]}"
+    fi
 }
 
 # Only run if the script is executed directly (not sourced)
