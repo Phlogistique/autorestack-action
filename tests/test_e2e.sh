@@ -482,9 +482,11 @@ echo >&2 "--- SCENARIO 0: Diff Validation Test ---"
 echo >&2 "0a. Creating 'no action' stack to verify diffs break without the action..."
 
 # Create 3 PRs for the no-action test (using prefix 'noact_')
+# IMPORTANT: Each feature changes a DIFFERENT line so that after retarget,
+# the diff clearly shows accumulated changes (multiple lines instead of just one)
 log_cmd git checkout main
 log_cmd git checkout -b noact_feature1 main
-sed -i '3s/.*/NoAct Feature 1 line 3/' file.txt
+sed -i '3s/.*/NoAct Feature 1 line 3/' file.txt  # Feature 1 changes LINE 3
 log_cmd git add file.txt
 log_cmd git commit -m "NoAct: Add feature 1"
 log_cmd git push origin noact_feature1
@@ -493,7 +495,7 @@ NOACT_PR1_NUM=$(echo "$NOACT_PR1_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created NoAct PR #$NOACT_PR1_NUM: $NOACT_PR1_URL"
 
 log_cmd git checkout -b noact_feature2 noact_feature1
-sed -i '3s/.*/NoAct Feature 2 line 3/' file.txt
+sed -i '4s/.*/NoAct Feature 2 line 4/' file.txt  # Feature 2 changes LINE 4 (different!)
 log_cmd git add file.txt
 log_cmd git commit -m "NoAct: Add feature 2"
 log_cmd git push origin noact_feature2
@@ -502,7 +504,7 @@ NOACT_PR2_NUM=$(echo "$NOACT_PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created NoAct PR #$NOACT_PR2_NUM: $NOACT_PR2_URL"
 
 log_cmd git checkout -b noact_feature3 noact_feature2
-sed -i '3s/.*/NoAct Feature 3 line 3/' file.txt
+sed -i '5s/.*/NoAct Feature 3 line 5/' file.txt  # Feature 3 changes LINE 5 (different!)
 log_cmd git add file.txt
 log_cmd git commit -m "NoAct: Add feature 3"
 log_cmd git push origin noact_feature3
@@ -517,15 +519,19 @@ NOACT_PR2_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR2_URL")
 NOACT_PR3_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR3_URL")
 
 # Verify each PR initially shows only its own single line change
+# PR1 should show "NoAct Feature 1", PR2 should show "NoAct Feature 2", etc.
 echo >&2 "Verifying initial diffs show only 1 line change each..."
-NOACT_PR1_LINES=$(echo "$NOACT_PR1_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
-NOACT_PR2_LINES=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
-NOACT_PR3_LINES=$(echo "$NOACT_PR3_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
+NOACT_PR1_CHANGES=$(echo "$NOACT_PR1_DIFF_INITIAL" | grep -c '^+NoAct Feature 1' || true)
+NOACT_PR2_CHANGES=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature 2' || true)
+NOACT_PR3_CHANGES=$(echo "$NOACT_PR3_DIFF_INITIAL" | grep -c '^+NoAct Feature 3' || true)
 
-if [[ "$NOACT_PR1_LINES" -eq 1 && "$NOACT_PR2_LINES" -eq 1 && "$NOACT_PR3_LINES" -eq 1 ]]; then
-    echo >&2 "✅ Initial diffs correct: each PR shows exactly 1 line change"
+# Also verify NO cross-contamination (PR2 shouldn't show Feature 1's changes)
+NOACT_PR2_POLLUTION=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature 1' || true)
+
+if [[ "$NOACT_PR1_CHANGES" -eq 1 && "$NOACT_PR2_CHANGES" -eq 1 && "$NOACT_PR3_CHANGES" -eq 1 && "$NOACT_PR2_POLLUTION" -eq 0 ]]; then
+    echo >&2 "✅ Initial diffs correct: each PR shows exactly its own 1 line change"
 else
-    echo >&2 "❌ Initial diffs incorrect: PR1=$NOACT_PR1_LINES, PR2=$NOACT_PR2_LINES, PR3=$NOACT_PR3_LINES (expected 1 each)"
+    echo >&2 "❌ Initial diffs incorrect: PR1=$NOACT_PR1_CHANGES, PR2=$NOACT_PR2_CHANGES, PR3=$NOACT_PR3_CHANGES, PR2 pollution=$NOACT_PR2_POLLUTION"
     exit 1
 fi
 
@@ -534,34 +540,53 @@ echo >&2 "0c. Merging NoAct PR1 (without action installed)..."
 merge_pr_with_retry "$NOACT_PR1_URL"
 echo >&2 "NoAct PR1 merged."
 
-# Wait a moment for GitHub to update PR state
-sleep 5
+# Manually retarget PR2 to main to simulate the "broken" state.
+# This must be done BEFORE deleting the branch to keep the PR open.
+#
+# In practice, this happens when:
+# - GitHub auto-retargets (depending on repo settings)
+# - A user manually changes the base branch
+# - A tool like "gh pr edit --base" is used
+#
+# Without the autorestack action, when you retarget to main, the diff becomes
+# "polluted" because it now shows ALL changes from the head branch relative to main,
+# not just the incremental changes from the previous PR in the stack.
+echo >&2 "0d. Retargeting PR2 to main to demonstrate broken diff state..."
+log_cmd gh pr edit "$NOACT_PR2_NUM" --repo "$REPO_FULL_NAME" --base main
 
-# Verify diffs are now BROKEN (PR2 should show 2 line changes: its own + the deleted base diff)
-echo >&2 "0d. Verifying diffs are BROKEN after merge (without action)..."
-NOACT_PR2_DIFF_AFTER_MERGE=$(get_pr_diff "$NOACT_PR2_URL")
-NOACT_PR3_DIFF_AFTER_MERGE=$(get_pr_diff "$NOACT_PR3_URL")
+# Wait for GitHub to process the base change
+sleep 3
 
-# PR2's base was noact_feature1 which no longer exists. GitHub retargets to main.
-# The diff should now show BOTH noact_feature1's changes AND noact_feature2's changes = 2 line changes
-# Actually check for more than 1 "NoAct Feature" line (proving the diff is now polluted)
-NOACT_PR2_LINES_AFTER=$(echo "$NOACT_PR2_DIFF_AFTER_MERGE" | grep -c '^[-+]NoAct Feature' || true)
+NOACT_PR2_DIFF_AFTER_RETARGET=$(get_pr_diff "$NOACT_PR2_URL")
 
-# Note: When base branch is deleted, GitHub auto-retargets to default branch (main).
-# This causes PR2's diff to include changes from BOTH feature1 AND feature2.
-# The diff should show "Feature 1" being removed (from main's perspective) and "Feature 2" being added.
-# Or it might show both as additions depending on exact git state.
-# The key point: the diff is DIFFERENT from the initial diff.
+# Debug: Show the actual diffs to see the difference
+echo >&2 "--- Initial PR2 diff (vs noact_feature1) ---"
+echo "$NOACT_PR2_DIFF_INITIAL" >&2
+echo >&2 "--- After retarget PR2 diff (vs main) ---"
+echo "$NOACT_PR2_DIFF_AFTER_RETARGET" >&2
+echo >&2 "------------------------"
 
-if [[ "$NOACT_PR2_DIFF_AFTER_MERGE" != "$NOACT_PR2_DIFF_INITIAL" ]]; then
-    echo >&2 "✅ Confirmed: PR2 diff changed after merge (broken state demonstrated)"
-    echo >&2 "   Initial diff lines: $(echo "$NOACT_PR2_DIFF_INITIAL" | wc -l)"
-    echo >&2 "   After merge lines: $(echo "$NOACT_PR2_DIFF_AFTER_MERGE" | wc -l)"
+# The diff should now be "polluted":
+# - Initial diff (vs noact_feature1): shows only Feature2's line 4 change
+# - After retarget (vs main): shows BOTH Feature1's line 3 AND Feature2's line 4 changes
+# This is the "broken" state - the PR now shows accumulated changes instead of incremental.
+
+# Check for pollution: after retarget, PR2's diff should now include Feature1's changes
+NOACT_PR2_POLLUTION_AFTER=$(echo "$NOACT_PR2_DIFF_AFTER_RETARGET" | grep -c 'NoAct Feature 1' || true)
+
+if [[ "$NOACT_PR2_POLLUTION_AFTER" -gt 0 ]]; then
+    echo >&2 "✅ Confirmed: PR2 diff is now POLLUTED with Feature1's changes (broken state demonstrated)"
+    echo >&2 "   Initial: only Feature2 changes visible"
+    echo >&2 "   After retarget: Feature1 changes also visible (pollution=$NOACT_PR2_POLLUTION_AFTER)"
 else
-    echo >&2 "❌ Unexpected: PR2 diff did NOT change after merge. Cannot demonstrate broken state."
-    echo >&2 "This might happen if GitHub's auto-retargeting behavior changed."
+    echo >&2 "❌ Unexpected: PR2 diff does NOT show Feature1's changes after retarget."
+    echo >&2 "Expected the diff to be polluted with accumulated changes."
     exit 1
 fi
+
+# Now delete the merged branch (cleanup)
+echo >&2 "Deleting noact_feature1 branch..."
+log_cmd git push origin --delete noact_feature1
 
 # --- Part B: Install the action and create a new stack ---
 echo >&2 "0e. Installing action and workflow..."
@@ -632,8 +657,9 @@ log_cmd git push origin main
 echo >&2 "0f. Creating 'with action' stack to verify diffs are preserved..."
 
 # Create 3 PRs for the with-action test (using prefix 'act_')
+# IMPORTANT: Each feature changes a DIFFERENT line (using 6, 7 to avoid overlap with noact_ stack's 3, 4, 5)
 log_cmd git checkout -b act_feature1 main
-sed -i '4s/.*/Act Feature 1 line 4/' file.txt
+sed -i '6s/.*/Act Feature 1 line 6/' file.txt  # Feature 1 changes LINE 6
 log_cmd git add file.txt
 log_cmd git commit -m "Act: Add feature 1"
 log_cmd git push origin act_feature1
@@ -642,7 +668,7 @@ ACT_PR1_NUM=$(echo "$ACT_PR1_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created Act PR #$ACT_PR1_NUM: $ACT_PR1_URL"
 
 log_cmd git checkout -b act_feature2 act_feature1
-sed -i '4s/.*/Act Feature 2 line 4/' file.txt
+sed -i '7s/.*/Act Feature 2 line 7/' file.txt  # Feature 2 changes LINE 7 (different!)
 log_cmd git add file.txt
 log_cmd git commit -m "Act: Add feature 2"
 log_cmd git push origin act_feature2
@@ -651,7 +677,7 @@ ACT_PR2_NUM=$(echo "$ACT_PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created Act PR #$ACT_PR2_NUM: $ACT_PR2_URL"
 
 log_cmd git checkout -b act_feature3 act_feature2
-sed -i '4s/.*/Act Feature 3 line 4/' file.txt
+sed -i '2s/.*/Act Feature 3 line 2/' file.txt  # Feature 3 changes LINE 2 (different!)
 log_cmd git add file.txt
 log_cmd git commit -m "Act: Add feature 3"
 log_cmd git push origin act_feature3
@@ -665,15 +691,19 @@ ACT_PR1_DIFF_INITIAL=$(get_pr_diff "$ACT_PR1_URL")
 ACT_PR2_DIFF_INITIAL=$(get_pr_diff "$ACT_PR2_URL")
 ACT_PR3_DIFF_INITIAL=$(get_pr_diff "$ACT_PR3_URL")
 
-# Verify initial diffs are correct (1 line change each)
-ACT_PR1_LINES=$(echo "$ACT_PR1_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
-ACT_PR2_LINES=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
-ACT_PR3_LINES=$(echo "$ACT_PR3_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
+# Verify initial diffs are correct (each PR shows only its own 1 line change)
+ACT_PR1_CHANGES=$(echo "$ACT_PR1_DIFF_INITIAL" | grep -c '^+Act Feature 1' || true)
+ACT_PR2_CHANGES=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+Act Feature 2' || true)
+ACT_PR3_CHANGES=$(echo "$ACT_PR3_DIFF_INITIAL" | grep -c '^+Act Feature 3' || true)
 
-if [[ "$ACT_PR1_LINES" -eq 1 && "$ACT_PR2_LINES" -eq 1 && "$ACT_PR3_LINES" -eq 1 ]]; then
-    echo >&2 "✅ Initial diffs correct: each Act PR shows exactly 1 line change"
+# Also verify NO cross-contamination (PR2's diff shouldn't ADD Feature 1's changes)
+# Use ^+ to only match actual additions, not context lines
+ACT_PR2_POLLUTION=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+.*Act Feature 1' || true)
+
+if [[ "$ACT_PR1_CHANGES" -eq 1 && "$ACT_PR2_CHANGES" -eq 1 && "$ACT_PR3_CHANGES" -eq 1 && "$ACT_PR2_POLLUTION" -eq 0 ]]; then
+    echo >&2 "✅ Initial diffs correct: each Act PR shows exactly its own 1 line change"
 else
-    echo >&2 "❌ Initial diffs incorrect: PR1=$ACT_PR1_LINES, PR2=$ACT_PR2_LINES, PR3=$ACT_PR3_LINES (expected 1 each)"
+    echo >&2 "❌ Initial diffs incorrect: PR1=$ACT_PR1_CHANGES, PR2=$ACT_PR2_CHANGES, PR3=$ACT_PR3_CHANGES, PR2 pollution=$ACT_PR2_POLLUTION"
     exit 1
 fi
 
@@ -694,6 +724,21 @@ fi
 echo >&2 "0j. Verifying diffs are PRESERVED after action ran..."
 ACT_PR2_DIFF_AFTER=$(get_pr_diff "$ACT_PR2_URL")
 ACT_PR3_DIFF_AFTER=$(get_pr_diff "$ACT_PR3_URL")
+
+# Debug: show the diffs
+echo >&2 "--- Act PR2 diff after action ---"
+echo "$ACT_PR2_DIFF_AFTER" >&2
+echo >&2 "------------------------"
+
+# Verify no pollution (PR2's diff should still not ADD Feature 1's changes)
+# Use ^+ to only match actual additions, not context lines
+ACT_PR2_POLLUTION_AFTER=$(echo "$ACT_PR2_DIFF_AFTER" | grep -c '^+.*Act Feature 1' || true)
+if [[ "$ACT_PR2_POLLUTION_AFTER" -gt 0 ]]; then
+    echo >&2 "❌ Act PR2 diff is polluted with Feature 1's changes after action"
+    echo >&2 "The action should preserve incremental diffs, but pollution found."
+    exit 1
+fi
+echo >&2 "✅ Act PR2 diff has no pollution (Feature 1 not added in diff)"
 
 if compare_diffs "$ACT_PR2_DIFF_INITIAL" "$ACT_PR2_DIFF_AFTER" "Act PR2 diff preserved"; then
     echo >&2 "✅ Act PR2 diff is identical before and after merge+action"
