@@ -15,6 +15,30 @@
 # TEST SCENARIOS
 # =============================================================================
 #
+# SCENARIO 0: Diff Validation Test (Steps 0a-0j)
+# -----------------------------------------------
+# This scenario validates that the action correctly preserves PR diffs by
+# testing TWO separate stacks:
+#
+# Part A - Without Action (proves diffs break):
+#   - Create 3-PR stack: main <- noact_feature1 <- noact_feature2 <- noact_feature3
+#   - Each PR modifies line 3 of file.txt
+#   - Capture initial diffs (each should show only 1 line change)
+#   - Merge noact_feature1 into main (no action runs - not installed yet)
+#   - Verify noact_feature2's diff is NOW BROKEN (shows accumulated changes)
+#
+# Part B - With Action (proves diffs are preserved):
+#   - Install the action workflow
+#   - Create 3-PR stack: main <- act_feature1 <- act_feature2 <- act_feature3
+#   - Each PR modifies line 4 of file.txt
+#   - Capture initial diffs (each should show only 1 line change)
+#   - Merge act_feature1 into main (action runs and updates stack)
+#   - Wait for action to complete
+#   - Verify act_feature2 and act_feature3 diffs are IDENTICAL to initial diffs
+#
+# This approach avoids race conditions by observing the broken state at leisure
+# (no action to race against), then verifying the fixed state after action runs.
+#
 # SCENARIO 1: Nominal Linear Stack with Clean Merges (Steps 1-7)
 # --------------------------------------------------------------
 # Tests the happy path where PRs are merged without conflicts.
@@ -143,6 +167,35 @@ cleanup() {
 # Trap EXIT signal to ensure cleanup runs even if the script fails
 trap cleanup EXIT
 
+
+# Get the full PR diff from GitHub.
+# This captures GitHub's view of what the PR changes (head vs base).
+# Used to verify the action preserves correct diff semantics.
+get_pr_diff() {
+    local pr_url=$1
+    gh pr diff "$pr_url" --repo "$REPO_FULL_NAME" 2>/dev/null
+}
+
+# Compare two diffs and return 0 if identical, 1 if different.
+# Also prints a message describing the result.
+compare_diffs() {
+    local diff1="$1"
+    local diff2="$2"
+    local context="$3"
+
+    if [[ "$diff1" == "$diff2" ]]; then
+        echo >&2 "✅ Diffs match: $context"
+        return 0
+    else
+        echo >&2 "❌ Diffs differ: $context"
+        echo >&2 "--- Expected diff ---"
+        echo "$diff1" >&2
+        echo >&2 "--- Actual diff ---"
+        echo "$diff2" >&2
+        echo >&2 "--------------------"
+        return 1
+    fi
+}
 
 # Merge a PR with retry logic to handle transient "not mergeable" errors.
 # After pushing to a PR's base branch, GitHub's mergeability computation is async
@@ -394,14 +447,134 @@ log_cmd git add file.txt
 log_cmd git commit -m "Initial commit"
 INITIAL_COMMIT_SHA=$(git rev-parse HEAD)
 
+# 2. Create remote GitHub repository
+echo >&2 "2. Creating remote GitHub repository: $REPO_FULL_NAME"
+
+log_cmd gh repo create "$REPO_FULL_NAME" --description "Temporary E2E test repo for update-pr-stack action" --public
+echo >&2 "Successfully created $REPO_FULL_NAME"
+
+# Enable GitHub Actions on the new repository (may be disabled by default in CI environments)
+echo >&2 "Enabling GitHub Actions on the repository..."
+log_cmd gh api -X PUT "/repos/$REPO_FULL_NAME/actions/permissions" --input - <<< '{"enabled":true,"allowed_actions":"all"}'
+
+# 3. Push initial state
+echo >&2 "3. Pushing initial state to remote..."
+REMOTE_URL="https://github.com/$REPO_FULL_NAME.git"
+log_cmd git remote add origin "$REMOTE_URL"
+
+log_cmd git push -u origin main
+
+# =============================================================================
+# SCENARIO 0: Diff Validation Test
+# =============================================================================
+# This scenario validates that the action correctly preserves PR diffs.
+# It runs TWO separate stacks:
+#   1. Without the action installed: proves diffs break after merge
+#   2. With the action installed: proves diffs are preserved
+#
+# This avoids race conditions since we observe the "broken" state at leisure
+# (no action runs to fix it), then verify the "fixed" state after action runs.
+# =============================================================================
+
+echo >&2 "--- SCENARIO 0: Diff Validation Test ---"
+
+# --- Part A: Create stack WITHOUT the action, verify diffs break ---
+echo >&2 "0a. Creating 'no action' stack to verify diffs break without the action..."
+
+# Create 3 PRs for the no-action test (using prefix 'noact_')
+log_cmd git checkout main
+log_cmd git checkout -b noact_feature1 main
+sed -i '3s/.*/NoAct Feature 1 line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "NoAct: Add feature 1"
+log_cmd git push origin noact_feature1
+NOACT_PR1_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base main --head noact_feature1 --title "NoAct Feature 1" --body "NoAct PR 1")
+NOACT_PR1_NUM=$(echo "$NOACT_PR1_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created NoAct PR #$NOACT_PR1_NUM: $NOACT_PR1_URL"
+
+log_cmd git checkout -b noact_feature2 noact_feature1
+sed -i '3s/.*/NoAct Feature 2 line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "NoAct: Add feature 2"
+log_cmd git push origin noact_feature2
+NOACT_PR2_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base noact_feature1 --head noact_feature2 --title "NoAct Feature 2" --body "NoAct PR 2, based on NoAct PR 1")
+NOACT_PR2_NUM=$(echo "$NOACT_PR2_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created NoAct PR #$NOACT_PR2_NUM: $NOACT_PR2_URL"
+
+log_cmd git checkout -b noact_feature3 noact_feature2
+sed -i '3s/.*/NoAct Feature 3 line 3/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "NoAct: Add feature 3"
+log_cmd git push origin noact_feature3
+NOACT_PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base noact_feature2 --head noact_feature3 --title "NoAct Feature 3" --body "NoAct PR 3, based on NoAct PR 2")
+NOACT_PR3_NUM=$(echo "$NOACT_PR3_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created NoAct PR #$NOACT_PR3_NUM: $NOACT_PR3_URL"
+
+# Capture initial diffs (each should show only 1 line change)
+echo >&2 "0b. Capturing initial diffs for 'no action' stack..."
+NOACT_PR1_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR1_URL")
+NOACT_PR2_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR2_URL")
+NOACT_PR3_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR3_URL")
+
+# Verify each PR initially shows only its own single line change
+echo >&2 "Verifying initial diffs show only 1 line change each..."
+NOACT_PR1_LINES=$(echo "$NOACT_PR1_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
+NOACT_PR2_LINES=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
+NOACT_PR3_LINES=$(echo "$NOACT_PR3_DIFF_INITIAL" | grep -c '^+NoAct Feature' || true)
+
+if [[ "$NOACT_PR1_LINES" -eq 1 && "$NOACT_PR2_LINES" -eq 1 && "$NOACT_PR3_LINES" -eq 1 ]]; then
+    echo >&2 "✅ Initial diffs correct: each PR shows exactly 1 line change"
+else
+    echo >&2 "❌ Initial diffs incorrect: PR1=$NOACT_PR1_LINES, PR2=$NOACT_PR2_LINES, PR3=$NOACT_PR3_LINES (expected 1 each)"
+    exit 1
+fi
+
+# Merge bottom PR WITHOUT the action installed
+echo >&2 "0c. Merging NoAct PR1 (without action installed)..."
+merge_pr_with_retry "$NOACT_PR1_URL"
+echo >&2 "NoAct PR1 merged."
+
+# Wait a moment for GitHub to update PR state
+sleep 5
+
+# Verify diffs are now BROKEN (PR2 should show 2 line changes: its own + the deleted base diff)
+echo >&2 "0d. Verifying diffs are BROKEN after merge (without action)..."
+NOACT_PR2_DIFF_AFTER_MERGE=$(get_pr_diff "$NOACT_PR2_URL")
+NOACT_PR3_DIFF_AFTER_MERGE=$(get_pr_diff "$NOACT_PR3_URL")
+
+# PR2's base was noact_feature1 which no longer exists. GitHub retargets to main.
+# The diff should now show BOTH noact_feature1's changes AND noact_feature2's changes = 2 line changes
+# Actually check for more than 1 "NoAct Feature" line (proving the diff is now polluted)
+NOACT_PR2_LINES_AFTER=$(echo "$NOACT_PR2_DIFF_AFTER_MERGE" | grep -c '^[-+]NoAct Feature' || true)
+
+# Note: When base branch is deleted, GitHub auto-retargets to default branch (main).
+# This causes PR2's diff to include changes from BOTH feature1 AND feature2.
+# The diff should show "Feature 1" being removed (from main's perspective) and "Feature 2" being added.
+# Or it might show both as additions depending on exact git state.
+# The key point: the diff is DIFFERENT from the initial diff.
+
+if [[ "$NOACT_PR2_DIFF_AFTER_MERGE" != "$NOACT_PR2_DIFF_INITIAL" ]]; then
+    echo >&2 "✅ Confirmed: PR2 diff changed after merge (broken state demonstrated)"
+    echo >&2 "   Initial diff lines: $(echo "$NOACT_PR2_DIFF_INITIAL" | wc -l)"
+    echo >&2 "   After merge lines: $(echo "$NOACT_PR2_DIFF_AFTER_MERGE" | wc -l)"
+else
+    echo >&2 "❌ Unexpected: PR2 diff did NOT change after merge. Cannot demonstrate broken state."
+    echo >&2 "This might happen if GitHub's auto-retargeting behavior changed."
+    exit 1
+fi
+
+# --- Part B: Install the action and create a new stack ---
+echo >&2 "0e. Installing action and workflow..."
+
+log_cmd git checkout main
+log_cmd git pull origin main
+
 # Copy action files
-echo >&2 "Copying action files..."
 cp "$PROJECT_ROOT/action.yml" .
 cp "$PROJECT_ROOT/update-pr-stack.sh" .
 cp "$PROJECT_ROOT/command_utils.sh" .
 
 # Create workflow file pointing to the local action
-echo >&2 "Creating workflow file..."
 mkdir -p .github/workflows
 cat > .github/workflows/"$WORKFLOW_FILE" <<EOF
 name: Update Stacked PRs on Squash Merge (E2E Test)
@@ -454,24 +627,93 @@ EOF
 
 log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
-ACTION_COMMIT_SHA=$(git rev-parse HEAD)
+log_cmd git push origin main
 
-# 2. Create remote GitHub repository
-echo >&2 "2. Creating remote GitHub repository: $REPO_FULL_NAME"
+echo >&2 "0f. Creating 'with action' stack to verify diffs are preserved..."
 
-log_cmd gh repo create "$REPO_FULL_NAME" --description "Temporary E2E test repo for update-pr-stack action" --public
-echo >&2 "Successfully created $REPO_FULL_NAME"
+# Create 3 PRs for the with-action test (using prefix 'act_')
+log_cmd git checkout -b act_feature1 main
+sed -i '4s/.*/Act Feature 1 line 4/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Act: Add feature 1"
+log_cmd git push origin act_feature1
+ACT_PR1_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base main --head act_feature1 --title "Act Feature 1" --body "Act PR 1")
+ACT_PR1_NUM=$(echo "$ACT_PR1_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created Act PR #$ACT_PR1_NUM: $ACT_PR1_URL"
 
-# Enable GitHub Actions on the new repository (may be disabled by default in CI environments)
-echo >&2 "Enabling GitHub Actions on the repository..."
-log_cmd gh api -X PUT "/repos/$REPO_FULL_NAME/actions/permissions" --input - <<< '{"enabled":true,"allowed_actions":"all"}'
+log_cmd git checkout -b act_feature2 act_feature1
+sed -i '4s/.*/Act Feature 2 line 4/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Act: Add feature 2"
+log_cmd git push origin act_feature2
+ACT_PR2_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base act_feature1 --head act_feature2 --title "Act Feature 2" --body "Act PR 2, based on Act PR 1")
+ACT_PR2_NUM=$(echo "$ACT_PR2_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created Act PR #$ACT_PR2_NUM: $ACT_PR2_URL"
 
-# 3. Push initial state
-echo >&2 "3. Pushing initial state to remote..."
-REMOTE_URL="https://github.com/$REPO_FULL_NAME.git"
-log_cmd git remote add origin "$REMOTE_URL"
+log_cmd git checkout -b act_feature3 act_feature2
+sed -i '4s/.*/Act Feature 3 line 4/' file.txt
+log_cmd git add file.txt
+log_cmd git commit -m "Act: Add feature 3"
+log_cmd git push origin act_feature3
+ACT_PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base act_feature2 --head act_feature3 --title "Act Feature 3" --body "Act PR 3, based on Act PR 2")
+ACT_PR3_NUM=$(echo "$ACT_PR3_URL" | awk -F'/' '{print $NF}')
+echo >&2 "Created Act PR #$ACT_PR3_NUM: $ACT_PR3_URL"
 
-log_cmd git push -u origin main
+# Capture initial diffs
+echo >&2 "0g. Capturing initial diffs for 'with action' stack..."
+ACT_PR1_DIFF_INITIAL=$(get_pr_diff "$ACT_PR1_URL")
+ACT_PR2_DIFF_INITIAL=$(get_pr_diff "$ACT_PR2_URL")
+ACT_PR3_DIFF_INITIAL=$(get_pr_diff "$ACT_PR3_URL")
+
+# Verify initial diffs are correct (1 line change each)
+ACT_PR1_LINES=$(echo "$ACT_PR1_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
+ACT_PR2_LINES=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
+ACT_PR3_LINES=$(echo "$ACT_PR3_DIFF_INITIAL" | grep -c '^+Act Feature' || true)
+
+if [[ "$ACT_PR1_LINES" -eq 1 && "$ACT_PR2_LINES" -eq 1 && "$ACT_PR3_LINES" -eq 1 ]]; then
+    echo >&2 "✅ Initial diffs correct: each Act PR shows exactly 1 line change"
+else
+    echo >&2 "❌ Initial diffs incorrect: PR1=$ACT_PR1_LINES, PR2=$ACT_PR2_LINES, PR3=$ACT_PR3_LINES (expected 1 each)"
+    exit 1
+fi
+
+# Merge bottom PR WITH the action installed
+echo >&2 "0h. Merging Act PR1 (with action installed)..."
+merge_pr_with_retry "$ACT_PR1_URL"
+ACT_MERGE_COMMIT_SHA=$(gh pr view "$ACT_PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
+echo >&2 "Act PR1 merged. Merge commit SHA: $ACT_MERGE_COMMIT_SHA"
+
+# Wait for the action to run
+echo >&2 "0i. Waiting for action to update the stack..."
+if ! wait_for_workflow "$ACT_PR1_NUM" "act_feature1" "$ACT_MERGE_COMMIT_SHA" "success"; then
+    echo >&2 "Action workflow did not complete successfully."
+    exit 1
+fi
+
+# Verify diffs are PRESERVED (identical to initial)
+echo >&2 "0j. Verifying diffs are PRESERVED after action ran..."
+ACT_PR2_DIFF_AFTER=$(get_pr_diff "$ACT_PR2_URL")
+ACT_PR3_DIFF_AFTER=$(get_pr_diff "$ACT_PR3_URL")
+
+if compare_diffs "$ACT_PR2_DIFF_INITIAL" "$ACT_PR2_DIFF_AFTER" "Act PR2 diff preserved"; then
+    echo >&2 "✅ Act PR2 diff is identical before and after merge+action"
+else
+    echo >&2 "❌ Act PR2 diff changed - action did not preserve diff correctly"
+    exit 1
+fi
+
+if compare_diffs "$ACT_PR3_DIFF_INITIAL" "$ACT_PR3_DIFF_AFTER" "Act PR3 diff preserved"; then
+    echo >&2 "✅ Act PR3 diff is identical before and after merge+action"
+else
+    echo >&2 "❌ Act PR3 diff changed - action did not preserve diff correctly"
+    exit 1
+fi
+
+echo >&2 "--- SCENARIO 0 PASSED: Diff validation test successful ---"
+echo >&2 "  - Without action: diffs broke as expected"
+echo >&2 "  - With action: diffs preserved correctly"
+
+
 # 4. Create stacked PRs
 echo >&2 "4. Creating stacked branches and PRs..."
 # Branch feature1 (base: main)
