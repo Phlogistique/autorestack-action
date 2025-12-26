@@ -11,13 +11,33 @@ inputs:
 runs:
   using: 'composite'
   steps:
+    - name: Check if action should run
+      id: check
+      shell: bash
+      env:
+        EVENT_ACTION: ${{ github.event.action }}
+        PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        PR_MERGED: ${{ github.event.pull_request.merged }}
+        MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+      run: |
+        if [[ "$EVENT_ACTION" == "closed" && "$PR_MERGED" == "true" && -n "$MERGE_COMMIT_SHA" ]]; then
+          echo "mode=squash-merge" >> $GITHUB_OUTPUT
+        elif [[ "$EVENT_ACTION" == "synchronize" && "$PR_LABELS" == *autorestack-needs-conflict-resolution* ]]; then
+          echo "mode=conflict-resolved" >> $GITHUB_OUTPUT
+        else
+          echo "Event does not match any action trigger (action=$EVENT_ACTION, merged=$PR_MERGED, labels=$PR_LABELS)"
+          echo "mode=skip" >> $GITHUB_OUTPUT
+        fi
+
     - name: Checkout repository
+      if: steps.check.outputs.mode != 'skip'
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
         token: ${{ inputs.github-token }}
 
-    - name: Detect mode and update PR stack
+    - name: Update PR stack
+      if: steps.check.outputs.mode != 'skip'
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -25,31 +45,13 @@ runs:
         GIT_AUTHOR_EMAIL: github-actions@github.com
         GIT_COMMITTER_NAME: github-actions
         GIT_COMMITTER_EMAIL: github-actions@github.com
-        # Context for mode detection
-        EVENT_ACTION: ${{ github.event.action }}
-        PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
-        PR_MERGED: ${{ github.event.pull_request.merged }}
-        MERGE_COMMIT_SHA: ${{ github.event.pull_request.merge_commit_sha }}
-        # Variables for squash-merge mode
+        ACTION_MODE: ${{ steps.check.outputs.mode }}
         SQUASH_COMMIT: ${{ github.event.pull_request.merge_commit_sha }}
         MERGED_BRANCH: ${{ github.event.pull_request.head.ref }}
         TARGET_BRANCH: ${{ github.event.pull_request.base.ref }}
-        # Variables for conflict-resolved mode
         PR_BRANCH: ${{ github.event.pull_request.head.ref }}
       run: |
-        # Auto-detect mode based on event context
-        if [[ "$EVENT_ACTION" == "closed" && "$PR_MERGED" == "true" && -n "$MERGE_COMMIT_SHA" ]]; then
-          echo "Detected squash-merge mode"
-          export ACTION_MODE="squash-merge"
-        elif [[ "$EVENT_ACTION" == "synchronize" && "$PR_LABELS" == *autorestack-needs-conflict-resolution* ]]; then
-          echo "Detected conflict-resolved mode"
-          export ACTION_MODE="conflict-resolved"
-        else
-          echo "Event does not match any action trigger (action=$EVENT_ACTION, merged=$PR_MERGED, labels=$PR_LABELS)"
-          echo "Nothing to do."
-          exit 0
-        fi
-
+        echo "Running in $ACTION_MODE mode"
         ${{ github.action_path }}/update-pr-stack.sh
 
 branding:
