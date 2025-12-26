@@ -21,13 +21,13 @@
 # branch is deleted and GitHub auto-retargets to main.
 #
 # Setup:
-#   - Enable "auto-delete head branches" in repo settings
 #   - Create 2-PR stack: main <- noact_feature1 <- noact_feature2
 #   - Each PR modifies a different line (3 and 4)
 #
 # Test:
 #   - Capture noact_feature2's initial diff (shows only its own 1-line change)
-#   - Merge noact_feature1 (GitHub auto-deletes branch and retargets PR2 to main)
+#   - Merge noact_feature1, then delete the branch
+#   - GitHub auto-retargets PR2 to main
 #   - Verify noact_feature2's diff is NOW POLLUTED (shows accumulated changes)
 #
 # Then installs the action for subsequent scenarios.
@@ -515,8 +515,8 @@ log_cmd git push -u origin main
 # This scenario proves that without the action, PR diffs become polluted
 # when the base branch is deleted and GitHub auto-retargets to main.
 #
-# We enable "auto-delete head branches" so GitHub automatically:
-# 1. Deletes the merged branch
+# After merging the base PR, we delete the branch. GitHub then:
+# 1. Detects the deleted branch
 # 2. Retargets child PRs to the default branch (main)
 #
 # This causes the child PR's diff to show accumulated changes instead of
@@ -525,13 +525,9 @@ log_cmd git push -u origin main
 
 echo >&2 "--- SCENARIO 0: Diff Pollution Test (without action) ---"
 
-# Enable auto-delete head branches to trigger GitHub's auto-retarget behavior
-echo >&2 "0a. Enabling auto-delete head branches..."
-log_cmd gh api -X PATCH "/repos/$REPO_FULL_NAME" --input - <<< '{"delete_branch_on_merge":true}'
-
 # Create 2 PRs for the no-action test (using prefix 'noact_')
 # Each feature changes a DIFFERENT line so pollution is clearly visible
-echo >&2 "0b. Creating 'no action' stack..."
+echo >&2 "0a. Creating 'no action' stack..."
 log_cmd git checkout main
 log_cmd git checkout -b noact_feature1 main
 sed -i '3s/.*/NoAct Feature 1 line 3/' file.txt  # Feature 1 changes LINE 3
@@ -552,37 +548,23 @@ NOACT_PR2_NUM=$(echo "$NOACT_PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created NoAct PR #$NOACT_PR2_NUM: $NOACT_PR2_URL"
 
 # Capture initial diff (should show only 1 line change)
-echo >&2 "0c. Capturing initial diff for PR2..."
+echo >&2 "0b. Capturing initial diff for PR2..."
 NOACT_PR2_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR2_URL")
 echo >&2 "--- Initial PR2 diff (vs noact_feature1) ---"
 echo "$NOACT_PR2_DIFF_INITIAL" >&2
 echo >&2 "----------------------------------------------"
 
 # Merge bottom PR WITHOUT the action installed
-# With auto-delete enabled, GitHub will delete noact_feature1 and retarget PR2 to main
-echo >&2 "0d. Merging NoAct PR1 (without action installed)..."
+# Then delete the branch to trigger GitHub's auto-retarget of PR2 to main
+echo >&2 "0c. Merging NoAct PR1 (without action installed)..."
 merge_pr_with_retry "$NOACT_PR1_URL"
-echo >&2 "NoAct PR1 merged. Branch should be auto-deleted and PR2 auto-retargeted."
+echo >&2 "NoAct PR1 merged."
 
-# Wait for GitHub to delete the branch (async operation)
-echo >&2 "Waiting for noact_feature1 branch to be deleted..."
-branch_deleted=false
-for attempt in {1..10}; do
-    if ! gh api "/repos/$REPO_FULL_NAME/branches/noact_feature1" &>/dev/null; then
-        echo >&2 "✅ Branch noact_feature1 was deleted (attempt $attempt)."
-        branch_deleted=true
-        break
-    fi
-    echo >&2 "Attempt $attempt/10: Branch still exists, waiting..."
-    sleep 2
-done
-
-if [[ "$branch_deleted" != "true" ]]; then
-    echo >&2 "❌ Branch noact_feature1 still exists after 10 attempts!"
-    echo >&2 "Repo settings:"
-    gh api "/repos/$REPO_FULL_NAME" --jq '{delete_branch_on_merge}' >&2
-    exit 1
-fi
+# Delete the branch to trigger auto-retarget
+# Note: repo setting 'delete_branch_on_merge' only works for web UI merges, not gh CLI
+echo >&2 "Deleting noact_feature1 branch to trigger auto-retarget..."
+log_cmd gh api -X DELETE "/repos/$REPO_FULL_NAME/git/refs/heads/noact_feature1"
+echo >&2 "Branch deleted. Waiting for GitHub to auto-retarget PR2 to main..."
 
 # Wait for GitHub to auto-retarget PR2 to main
 if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main"; then
@@ -608,12 +590,8 @@ fi
 
 echo >&2 "--- SCENARIO 0 PASSED: Diff pollution demonstrated ---"
 
-# Disable auto-delete for remaining scenarios (action handles branch deletion)
-echo >&2 "Disabling auto-delete head branches for remaining scenarios..."
-log_cmd gh api -X PATCH "/repos/$REPO_FULL_NAME" --input - <<< '{"delete_branch_on_merge":false}'
-
 # Install the action workflow for subsequent scenarios
-echo >&2 "0e. Installing action and workflow..."
+echo >&2 "0d. Installing action and workflow..."
 log_cmd git checkout main
 log_cmd git pull origin main
 
