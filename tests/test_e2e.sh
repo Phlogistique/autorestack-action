@@ -15,31 +15,24 @@
 # TEST SCENARIOS
 # =============================================================================
 #
-# SCENARIO 0: Diff Validation Test (Steps 0a-0j)
-# -----------------------------------------------
-# This scenario validates that the action correctly preserves PR diffs by
-# testing TWO separate stacks:
+# SCENARIO 0: Diff Pollution Test (without action)
+# -------------------------------------------------
+# Proves that without the action, PR diffs become polluted when the base
+# branch is deleted and GitHub auto-retargets to main.
 #
-# Part A - Without Action (proves diffs break):
-#   - Create 3-PR stack: main <- noact_feature1 <- noact_feature2 <- noact_feature3
-#   - Each PR modifies line 3 of file.txt
-#   - Capture initial diffs (each should show only 1 line change)
-#   - Merge noact_feature1 into main (no action runs - not installed yet)
-#   - Verify noact_feature2's diff is NOW BROKEN (shows accumulated changes)
+# Setup:
+#   - Enable "auto-delete head branches" in repo settings
+#   - Create 2-PR stack: main <- noact_feature1 <- noact_feature2
+#   - Each PR modifies a different line (3 and 4)
 #
-# Part B - With Action (proves diffs are preserved):
-#   - Install the action workflow
-#   - Create 3-PR stack: main <- act_feature1 <- act_feature2 <- act_feature3
-#   - Each PR modifies line 4 of file.txt
-#   - Capture initial diffs (each should show only 1 line change)
-#   - Merge act_feature1 into main (action runs and updates stack)
-#   - Wait for action to complete
-#   - Verify act_feature2 and act_feature3 diffs are IDENTICAL to initial diffs
+# Test:
+#   - Capture noact_feature2's initial diff (shows only its own 1-line change)
+#   - Merge noact_feature1 (GitHub auto-deletes branch and retargets PR2 to main)
+#   - Verify noact_feature2's diff is NOW POLLUTED (shows accumulated changes)
 #
-# This approach avoids race conditions by observing the broken state at leisure
-# (no action to race against), then verifying the fixed state after action runs.
+# Then installs the action for subsequent scenarios.
 #
-# SCENARIO 1: Nominal Linear Stack with Clean Merges (Steps 1-7)
+# SCENARIO 1: Nominal Linear Stack with Clean Merges (Steps 4-7)
 # --------------------------------------------------------------
 # Tests the happy path where PRs are merged without conflicts.
 #
@@ -62,7 +55,7 @@
 #   - PR2 base branch is updated from feature1 to main
 #   - PR3 base branch remains feature2 (only direct children are updated)
 #   - feature2, feature3, and feature4 branches contain the squash merge commit
-#   - PR diffs show the correct changes relative to their new bases
+#   - PR diffs are IDENTICAL before and after (action preserves incremental diffs)
 #
 # SCENARIO 2: Conflict Handling (Steps 8-13)
 # ------------------------------------------
@@ -195,6 +188,32 @@ compare_diffs() {
         echo >&2 "--------------------"
         return 1
     fi
+}
+
+# Wait for a PR's base branch to change to the expected value.
+# Uses retry loop instead of arbitrary sleep.
+wait_for_pr_base_change() {
+    local pr_number=$1
+    local expected_base=$2
+    local max_attempts=${3:-10}
+    local attempt=1
+
+    while [[ $attempt -le $max_attempts ]]; do
+        local current_base
+        current_base=$(gh pr view "$pr_number" --repo "$REPO_FULL_NAME" --json baseRefName --jq .baseRefName)
+
+        if [[ "$current_base" == "$expected_base" ]]; then
+            echo >&2 "✅ PR #$pr_number base is now '$expected_base'"
+            return 0
+        fi
+
+        echo >&2 "Attempt $attempt/$max_attempts: PR #$pr_number base is '$current_base', waiting for '$expected_base'..."
+        sleep 2
+        attempt=$((attempt + 1))
+    done
+
+    echo >&2 "❌ Timeout: PR #$pr_number base did not change to '$expected_base'"
+    return 1
 }
 
 # Merge a PR with retry logic to handle transient "not mergeable" errors.
@@ -491,25 +510,28 @@ log_cmd git remote add origin "$REMOTE_URL"
 log_cmd git push -u origin main
 
 # =============================================================================
-# SCENARIO 0: Diff Validation Test
+# SCENARIO 0: Diff Pollution Test (without action)
 # =============================================================================
-# This scenario validates that the action correctly preserves PR diffs.
-# It runs TWO separate stacks:
-#   1. Without the action installed: proves diffs break after merge
-#   2. With the action installed: proves diffs are preserved
+# This scenario proves that without the action, PR diffs become polluted
+# when the base branch is deleted and GitHub auto-retargets to main.
 #
-# This avoids race conditions since we observe the "broken" state at leisure
-# (no action runs to fix it), then verify the "fixed" state after action runs.
+# We enable "auto-delete head branches" so GitHub automatically:
+# 1. Deletes the merged branch
+# 2. Retargets child PRs to the default branch (main)
+#
+# This causes the child PR's diff to show accumulated changes instead of
+# just its own incremental changes - the "broken" state we want to demonstrate.
 # =============================================================================
 
-echo >&2 "--- SCENARIO 0: Diff Validation Test ---"
+echo >&2 "--- SCENARIO 0: Diff Pollution Test (without action) ---"
 
-# --- Part A: Create stack WITHOUT the action, verify diffs break ---
-echo >&2 "0a. Creating 'no action' stack to verify diffs break without the action..."
+# Enable auto-delete head branches to trigger GitHub's auto-retarget behavior
+echo >&2 "0a. Enabling auto-delete head branches..."
+log_cmd gh api -X PATCH "/repos/$REPO_FULL_NAME" --input - <<< '{"delete_branch_on_merge":true}'
 
-# Create 3 PRs for the no-action test (using prefix 'noact_')
-# IMPORTANT: Each feature changes a DIFFERENT line so that after retarget,
-# the diff clearly shows accumulated changes (multiple lines instead of just one)
+# Create 2 PRs for the no-action test (using prefix 'noact_')
+# Each feature changes a DIFFERENT line so pollution is clearly visible
+echo >&2 "0b. Creating 'no action' stack..."
 log_cmd git checkout main
 log_cmd git checkout -b noact_feature1 main
 sed -i '3s/.*/NoAct Feature 1 line 3/' file.txt  # Feature 1 changes LINE 3
@@ -529,104 +551,52 @@ NOACT_PR2_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base noact_featu
 NOACT_PR2_NUM=$(echo "$NOACT_PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created NoAct PR #$NOACT_PR2_NUM: $NOACT_PR2_URL"
 
-log_cmd git checkout -b noact_feature3 noact_feature2
-sed -i '5s/.*/NoAct Feature 3 line 5/' file.txt  # Feature 3 changes LINE 5 (different!)
-log_cmd git add file.txt
-log_cmd git commit -m "NoAct: Add feature 3"
-log_cmd git push origin noact_feature3
-NOACT_PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base noact_feature2 --head noact_feature3 --title "NoAct Feature 3" --body "NoAct PR 3, based on NoAct PR 2")
-NOACT_PR3_NUM=$(echo "$NOACT_PR3_URL" | awk -F'/' '{print $NF}')
-echo >&2 "Created NoAct PR #$NOACT_PR3_NUM: $NOACT_PR3_URL"
-
-# Capture initial diffs (each should show only 1 line change)
-echo >&2 "0b. Capturing initial diffs for 'no action' stack..."
-NOACT_PR1_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR1_URL")
+# Capture initial diff (should show only 1 line change)
+echo >&2 "0c. Capturing initial diff for PR2..."
 NOACT_PR2_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR2_URL")
-NOACT_PR3_DIFF_INITIAL=$(get_pr_diff "$NOACT_PR3_URL")
-
-# Verify each PR initially shows only its own single line change
-# PR1 should show "NoAct Feature 1", PR2 should show "NoAct Feature 2", etc.
-echo >&2 "Verifying initial diffs show only 1 line change each..."
-NOACT_PR1_CHANGES=$(echo "$NOACT_PR1_DIFF_INITIAL" | grep -c '^+NoAct Feature 1' || true)
-NOACT_PR2_CHANGES=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature 2' || true)
-NOACT_PR3_CHANGES=$(echo "$NOACT_PR3_DIFF_INITIAL" | grep -c '^+NoAct Feature 3' || true)
-
-# Also verify NO cross-contamination (PR2 shouldn't show Feature 1's changes)
-NOACT_PR2_POLLUTION=$(echo "$NOACT_PR2_DIFF_INITIAL" | grep -c '^+NoAct Feature 1' || true)
-
-if [[ "$NOACT_PR1_CHANGES" -eq 1 && "$NOACT_PR2_CHANGES" -eq 1 && "$NOACT_PR3_CHANGES" -eq 1 && "$NOACT_PR2_POLLUTION" -eq 0 ]]; then
-    echo >&2 "✅ Initial diffs correct: each PR shows exactly its own 1 line change"
-else
-    echo >&2 "❌ Initial diffs incorrect: PR1=$NOACT_PR1_CHANGES, PR2=$NOACT_PR2_CHANGES, PR3=$NOACT_PR3_CHANGES, PR2 pollution=$NOACT_PR2_POLLUTION"
-    exit 1
-fi
-
-# Merge bottom PR WITHOUT the action installed
-echo >&2 "0c. Merging NoAct PR1 (without action installed)..."
-merge_pr_with_retry "$NOACT_PR1_URL"
-echo >&2 "NoAct PR1 merged."
-
-# Manually retarget PR2 to main to simulate the "broken" state.
-# This must be done BEFORE deleting the branch to keep the PR open.
-#
-# In practice, this happens when:
-# - GitHub auto-retargets (depending on repo settings)
-# - A user manually changes the base branch
-# - A tool like "gh pr edit --base" is used
-#
-# Without the autorestack action, when you retarget to main, the diff becomes
-# "polluted" because it now shows ALL changes from the head branch relative to main,
-# not just the incremental changes from the previous PR in the stack.
-echo >&2 "0d. Retargeting PR2 to main to demonstrate broken diff state..."
-log_cmd gh pr edit "$NOACT_PR2_NUM" --repo "$REPO_FULL_NAME" --base main
-
-# Wait for GitHub to process the base change
-sleep 3
-
-NOACT_PR2_DIFF_AFTER_RETARGET=$(get_pr_diff "$NOACT_PR2_URL")
-
-# Debug: Show the actual diffs to see the difference
 echo >&2 "--- Initial PR2 diff (vs noact_feature1) ---"
 echo "$NOACT_PR2_DIFF_INITIAL" >&2
-echo >&2 "--- After retarget PR2 diff (vs main) ---"
-echo "$NOACT_PR2_DIFF_AFTER_RETARGET" >&2
-echo >&2 "------------------------"
+echo >&2 "----------------------------------------------"
 
-# The diff should now be "polluted":
-# - Initial diff (vs noact_feature1): shows only Feature2's line 4 change
-# - After retarget (vs main): shows BOTH Feature1's line 3 AND Feature2's line 4 changes
-# This is the "broken" state - the PR now shows accumulated changes instead of incremental.
+# Merge bottom PR WITHOUT the action installed
+# With auto-delete enabled, GitHub will delete noact_feature1 and retarget PR2 to main
+echo >&2 "0d. Merging NoAct PR1 (without action installed)..."
+merge_pr_with_retry "$NOACT_PR1_URL"
+echo >&2 "NoAct PR1 merged. Branch should be auto-deleted and PR2 auto-retargeted."
 
-# Check for pollution: after retarget, PR2's diff should now include Feature1's changes
-NOACT_PR2_POLLUTION_AFTER=$(echo "$NOACT_PR2_DIFF_AFTER_RETARGET" | grep -c 'NoAct Feature 1' || true)
-
-if [[ "$NOACT_PR2_POLLUTION_AFTER" -gt 0 ]]; then
-    echo >&2 "✅ Confirmed: PR2 diff is now POLLUTED with Feature1's changes (broken state demonstrated)"
-    echo >&2 "   Initial: only Feature2 changes visible"
-    echo >&2 "   After retarget: Feature1 changes also visible (pollution=$NOACT_PR2_POLLUTION_AFTER)"
-else
-    echo >&2 "❌ Unexpected: PR2 diff does NOT show Feature1's changes after retarget."
-    echo >&2 "Expected the diff to be polluted with accumulated changes."
+# Wait for GitHub to retarget PR2 to main
+if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main"; then
+    echo >&2 "❌ GitHub did not auto-retarget PR2 to main"
     exit 1
 fi
 
-# Now delete the merged branch (cleanup)
-echo >&2 "Deleting noact_feature1 branch..."
-log_cmd git push origin --delete noact_feature1
+# Capture diff after retarget
+NOACT_PR2_DIFF_AFTER=$(get_pr_diff "$NOACT_PR2_URL")
+echo >&2 "--- After retarget PR2 diff (vs main) ---"
+echo "$NOACT_PR2_DIFF_AFTER" >&2
+echo >&2 "------------------------------------------"
 
-# --- Part B: Install the action and create a new stack ---
+# The diff should now be different (polluted with Feature1's changes)
+if [[ "$NOACT_PR2_DIFF_AFTER" != "$NOACT_PR2_DIFF_INITIAL" ]]; then
+    echo >&2 "✅ Confirmed: PR2 diff changed after retarget (broken state demonstrated)"
+else
+    echo >&2 "❌ Unexpected: PR2 diff did NOT change after retarget"
+    exit 1
+fi
+
+echo >&2 "--- SCENARIO 0 PASSED: Diff pollution demonstrated ---"
+
+# Disable auto-delete for remaining scenarios (action handles branch deletion)
+echo >&2 "Disabling auto-delete head branches for remaining scenarios..."
+log_cmd gh api -X PATCH "/repos/$REPO_FULL_NAME" --input - <<< '{"delete_branch_on_merge":false}'
+
+# Install the action workflow for subsequent scenarios
 echo >&2 "0e. Installing action and workflow..."
-
 log_cmd git checkout main
 log_cmd git pull origin main
 
-# Copy workflow file from the repo and modify it to use the current commit SHA
-# This tests the actual deployed action, not a local copy
-echo >&2 "Copying workflow file from repo..."
 mkdir -p .github/workflows
 cp "$PROJECT_ROOT/.github/workflows/$WORKFLOW_FILE" .github/workflows/
-
-# Replace @main with the current commit SHA to test exactly what we pushed
 sed -i "s|uses: Phlogistique/autorestack-action@main|uses: Phlogistique/autorestack-action@$ACTION_REPO_COMMIT|g" .github/workflows/"$WORKFLOW_FILE"
 echo >&2 "Modified workflow to use action at commit $ACTION_REPO_COMMIT"
 
@@ -634,110 +604,13 @@ log_cmd git add .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
 log_cmd git push origin main
 
-echo >&2 "0f. Creating 'with action' stack to verify diffs are preserved..."
 
-# Create 3 PRs for the with-action test (using prefix 'act_')
-# IMPORTANT: Each feature changes a DIFFERENT line (using 6, 7 to avoid overlap with noact_ stack's 3, 4, 5)
-log_cmd git checkout -b act_feature1 main
-sed -i '6s/.*/Act Feature 1 line 6/' file.txt  # Feature 1 changes LINE 6
-log_cmd git add file.txt
-log_cmd git commit -m "Act: Add feature 1"
-log_cmd git push origin act_feature1
-ACT_PR1_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base main --head act_feature1 --title "Act Feature 1" --body "Act PR 1")
-ACT_PR1_NUM=$(echo "$ACT_PR1_URL" | awk -F'/' '{print $NF}')
-echo >&2 "Created Act PR #$ACT_PR1_NUM: $ACT_PR1_URL"
-
-log_cmd git checkout -b act_feature2 act_feature1
-sed -i '7s/.*/Act Feature 2 line 7/' file.txt  # Feature 2 changes LINE 7 (different!)
-log_cmd git add file.txt
-log_cmd git commit -m "Act: Add feature 2"
-log_cmd git push origin act_feature2
-ACT_PR2_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base act_feature1 --head act_feature2 --title "Act Feature 2" --body "Act PR 2, based on Act PR 1")
-ACT_PR2_NUM=$(echo "$ACT_PR2_URL" | awk -F'/' '{print $NF}')
-echo >&2 "Created Act PR #$ACT_PR2_NUM: $ACT_PR2_URL"
-
-log_cmd git checkout -b act_feature3 act_feature2
-sed -i '2s/.*/Act Feature 3 line 2/' file.txt  # Feature 3 changes LINE 2 (different!)
-log_cmd git add file.txt
-log_cmd git commit -m "Act: Add feature 3"
-log_cmd git push origin act_feature3
-ACT_PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base act_feature2 --head act_feature3 --title "Act Feature 3" --body "Act PR 3, based on Act PR 2")
-ACT_PR3_NUM=$(echo "$ACT_PR3_URL" | awk -F'/' '{print $NF}')
-echo >&2 "Created Act PR #$ACT_PR3_NUM: $ACT_PR3_URL"
-
-# Capture initial diffs
-echo >&2 "0g. Capturing initial diffs for 'with action' stack..."
-ACT_PR1_DIFF_INITIAL=$(get_pr_diff "$ACT_PR1_URL")
-ACT_PR2_DIFF_INITIAL=$(get_pr_diff "$ACT_PR2_URL")
-ACT_PR3_DIFF_INITIAL=$(get_pr_diff "$ACT_PR3_URL")
-
-# Verify initial diffs are correct (each PR shows only its own 1 line change)
-ACT_PR1_CHANGES=$(echo "$ACT_PR1_DIFF_INITIAL" | grep -c '^+Act Feature 1' || true)
-ACT_PR2_CHANGES=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+Act Feature 2' || true)
-ACT_PR3_CHANGES=$(echo "$ACT_PR3_DIFF_INITIAL" | grep -c '^+Act Feature 3' || true)
-
-# Also verify NO cross-contamination (PR2's diff shouldn't ADD Feature 1's changes)
-# Use ^+ to only match actual additions, not context lines
-ACT_PR2_POLLUTION=$(echo "$ACT_PR2_DIFF_INITIAL" | grep -c '^+.*Act Feature 1' || true)
-
-if [[ "$ACT_PR1_CHANGES" -eq 1 && "$ACT_PR2_CHANGES" -eq 1 && "$ACT_PR3_CHANGES" -eq 1 && "$ACT_PR2_POLLUTION" -eq 0 ]]; then
-    echo >&2 "✅ Initial diffs correct: each Act PR shows exactly its own 1 line change"
-else
-    echo >&2 "❌ Initial diffs incorrect: PR1=$ACT_PR1_CHANGES, PR2=$ACT_PR2_CHANGES, PR3=$ACT_PR3_CHANGES, PR2 pollution=$ACT_PR2_POLLUTION"
-    exit 1
-fi
-
-# Merge bottom PR WITH the action installed
-echo >&2 "0h. Merging Act PR1 (with action installed)..."
-merge_pr_with_retry "$ACT_PR1_URL"
-ACT_MERGE_COMMIT_SHA=$(gh pr view "$ACT_PR1_URL" --repo "$REPO_FULL_NAME" --json mergeCommit -q .mergeCommit.oid)
-echo >&2 "Act PR1 merged. Merge commit SHA: $ACT_MERGE_COMMIT_SHA"
-
-# Wait for the action to run
-echo >&2 "0i. Waiting for action to update the stack..."
-if ! wait_for_workflow "$ACT_PR1_NUM" "act_feature1" "$ACT_MERGE_COMMIT_SHA" "success"; then
-    echo >&2 "Action workflow did not complete successfully."
-    exit 1
-fi
-
-# Verify diffs are PRESERVED (identical to initial)
-echo >&2 "0j. Verifying diffs are PRESERVED after action ran..."
-ACT_PR2_DIFF_AFTER=$(get_pr_diff "$ACT_PR2_URL")
-ACT_PR3_DIFF_AFTER=$(get_pr_diff "$ACT_PR3_URL")
-
-# Debug: show the diffs
-echo >&2 "--- Act PR2 diff after action ---"
-echo "$ACT_PR2_DIFF_AFTER" >&2
-echo >&2 "------------------------"
-
-# Verify no pollution (PR2's diff should still not ADD Feature 1's changes)
-# Use ^+ to only match actual additions, not context lines
-ACT_PR2_POLLUTION_AFTER=$(echo "$ACT_PR2_DIFF_AFTER" | grep -c '^+.*Act Feature 1' || true)
-if [[ "$ACT_PR2_POLLUTION_AFTER" -gt 0 ]]; then
-    echo >&2 "❌ Act PR2 diff is polluted with Feature 1's changes after action"
-    echo >&2 "The action should preserve incremental diffs, but pollution found."
-    exit 1
-fi
-echo >&2 "✅ Act PR2 diff has no pollution (Feature 1 not added in diff)"
-
-if compare_diffs "$ACT_PR2_DIFF_INITIAL" "$ACT_PR2_DIFF_AFTER" "Act PR2 diff preserved"; then
-    echo >&2 "✅ Act PR2 diff is identical before and after merge+action"
-else
-    echo >&2 "❌ Act PR2 diff changed - action did not preserve diff correctly"
-    exit 1
-fi
-
-if compare_diffs "$ACT_PR3_DIFF_INITIAL" "$ACT_PR3_DIFF_AFTER" "Act PR3 diff preserved"; then
-    echo >&2 "✅ Act PR3 diff is identical before and after merge+action"
-else
-    echo >&2 "❌ Act PR3 diff changed - action did not preserve diff correctly"
-    exit 1
-fi
-
-echo >&2 "--- SCENARIO 0 PASSED: Diff validation test successful ---"
-echo >&2 "  - Without action: diffs broke as expected"
-echo >&2 "  - With action: diffs preserved correctly"
-
+# =============================================================================
+# SCENARIO 1: Nominal Linear Stack with Clean Merges
+# =============================================================================
+# Tests the happy path where PRs are merged without conflicts.
+# Also validates that diffs are preserved after the action runs.
+# =============================================================================
 
 # 4. Create stacked PRs
 echo >&2 "4. Creating stacked branches and PRs..."
@@ -778,6 +651,12 @@ log_cmd git push origin feature4
 PR4_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature3 --head feature4 --title "Feature 4" --body "This is PR 4, based on PR 3 (grandchild for conflict resolution test)")
 PR4_NUM=$(echo "$PR4_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR4_NUM: $PR4_URL"
+
+# Capture initial diffs for diff validation
+echo >&2 "Capturing initial diffs for diff validation..."
+PR2_DIFF_INITIAL=$(get_pr_diff "$PR2_URL")
+PR3_DIFF_INITIAL=$(get_pr_diff "$PR3_URL")
+PR4_DIFF_INITIAL=$(get_pr_diff "$PR4_URL")
 
 # --- Initial Merge Scenario ---
 echo >&2 "--- Testing Initial Merge (PR1) ---"
@@ -899,6 +778,22 @@ else
     echo "Expected Added Line Content: $EXPECTED_DIFF4_CONTENT"
     echo "Actual Added Line Content: $ACTUAL_DIFF4_CONTENT"
     gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME"
+    exit 1
+fi
+
+# Verify diffs are preserved (identical to initial)
+echo >&2 "Verifying diffs are preserved after action..."
+PR2_DIFF_AFTER=$(get_pr_diff "$PR2_URL")
+PR3_DIFF_AFTER=$(get_pr_diff "$PR3_URL")
+PR4_DIFF_AFTER=$(get_pr_diff "$PR4_URL")
+
+if ! compare_diffs "$PR2_DIFF_INITIAL" "$PR2_DIFF_AFTER" "PR2 diff preserved"; then
+    exit 1
+fi
+if ! compare_diffs "$PR3_DIFF_INITIAL" "$PR3_DIFF_AFTER" "PR3 diff preserved"; then
+    exit 1
+fi
+if ! compare_diffs "$PR4_DIFF_INITIAL" "$PR4_DIFF_AFTER" "PR4 diff preserved"; then
     exit 1
 fi
 
