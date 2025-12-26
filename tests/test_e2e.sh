@@ -554,17 +554,12 @@ echo >&2 "--- Initial PR2 diff (vs noact_feature1) ---"
 echo "$NOACT_PR2_DIFF_INITIAL" >&2
 echo >&2 "----------------------------------------------"
 
-# Merge bottom PR WITHOUT the action installed
-# Then delete the branch to trigger GitHub's auto-retarget of PR2 to main
-echo >&2 "0c. Merging NoAct PR1 (without action installed)..."
-merge_pr_with_retry "$NOACT_PR1_URL"
-echo >&2 "NoAct PR1 merged."
-
-# Delete the branch to trigger auto-retarget
-# Note: repo setting 'delete_branch_on_merge' only works for web UI merges, not gh CLI
-echo >&2 "Deleting noact_feature1 branch to trigger auto-retarget..."
-log_cmd gh api -X DELETE "/repos/$REPO_FULL_NAME/git/refs/heads/noact_feature1"
-echo >&2 "Branch deleted. Waiting for GitHub to auto-retarget PR2 to main..."
+# Merge bottom PR WITHOUT the action installed, deleting the branch
+# to trigger GitHub's auto-retarget of PR2 to main
+echo >&2 "0c. Merging NoAct PR1 and deleting branch..."
+# Use --delete-branch to trigger auto-retarget (must be part of merge, not separate)
+log_cmd gh pr merge "$NOACT_PR1_URL" --squash --delete-branch --repo "$REPO_FULL_NAME"
+echo >&2 "NoAct PR1 merged and branch deleted. Waiting for GitHub to auto-retarget PR2..."
 
 # Wait for GitHub to auto-retarget PR2 to main
 if ! wait_for_pr_base_change "$NOACT_PR2_NUM" "main"; then
