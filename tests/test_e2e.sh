@@ -263,16 +263,14 @@ wait_for_synchronize_workflow() {
             echo >&2 "Found candidate run IDs: $candidate_run_ids. Checking runs..."
             for run_id in $candidate_run_ids; do
                 echo >&2 "Checking candidate run ID: $run_id"
-                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch,jobs || echo "{}")
+                run_info=$(log_cmd gh run view "$run_id" --repo "$REPO_FULL_NAME" --json headBranch || echo "{}")
 
                 run_head_branch=$(echo "$run_info" | jq -r '.headBranch // ""')
-                # Check if this run has the continue-after-conflict-resolution job
-                has_continue_job=$(echo "$run_info" | jq -r '.jobs[] | select(.name == "continue-after-conflict-resolution") | .name' || echo "")
 
-                echo >&2 "  Run head branch: $run_head_branch, has continue job: $has_continue_job"
+                echo >&2 "  Run head branch: $run_head_branch"
 
-                if [[ "$run_head_branch" == "$branch_name" && -n "$has_continue_job" ]]; then
-                    echo >&2 "Found matching workflow run ID: $run_id (synchronize with continue job)"
+                if [[ "$run_head_branch" == "$branch_name" ]]; then
+                    echo >&2 "Found matching workflow run ID: $run_id (branch matches)"
                     target_run_id="$run_id"
                     break
                 fi
@@ -424,6 +422,34 @@ wait_for_workflow() {
 
 # --- Test Execution ---
 echo >&2 "--- Starting E2E Test ---"
+
+# 0. Sanity checks - ensure we're testing committed code
+echo >&2 "0. Running sanity checks..."
+
+# Check that the working directory is clean
+if ! git -C "$PROJECT_ROOT" diff --quiet HEAD 2>/dev/null; then
+    echo >&2 "ERROR: Repository has uncommitted changes."
+    echo >&2 "Please commit your changes before running e2e tests."
+    echo >&2 "This ensures we test exactly what will be deployed."
+    git -C "$PROJECT_ROOT" status --short >&2
+    exit 1
+fi
+
+# Get the current commit SHA from the action repo
+ACTION_REPO_COMMIT=$(git -C "$PROJECT_ROOT" rev-parse HEAD)
+echo >&2 "Testing commit: $ACTION_REPO_COMMIT"
+
+# Check that the current commit exists on origin
+if ! git -C "$PROJECT_ROOT" fetch origin --quiet 2>/dev/null; then
+    echo >&2 "WARNING: Could not fetch from origin, skipping remote check"
+elif ! git -C "$PROJECT_ROOT" branch -r --contains "$ACTION_REPO_COMMIT" 2>/dev/null | grep -q .; then
+    echo >&2 "ERROR: Current commit $ACTION_REPO_COMMIT does not exist on origin."
+    echo >&2 "Please push your changes before running e2e tests."
+    echo >&2 "This ensures the workflow can reference the action at this commit."
+    exit 1
+fi
+
+echo >&2 "✅ Sanity checks passed"
 
 # 1. Setup local repository
 echo >&2 "1. Setting up local test repository..."
@@ -594,63 +620,17 @@ echo >&2 "0e. Installing action and workflow..."
 log_cmd git checkout main
 log_cmd git pull origin main
 
-# Copy action files
-cp "$PROJECT_ROOT/action.yml" .
-cp "$PROJECT_ROOT/update-pr-stack.sh" .
-cp "$PROJECT_ROOT/command_utils.sh" .
-
-# Create workflow file pointing to the local action
+# Copy workflow file from the repo and modify it to use the current commit SHA
+# This tests the actual deployed action, not a local copy
+echo >&2 "Copying workflow file from repo..."
 mkdir -p .github/workflows
-cat > .github/workflows/"$WORKFLOW_FILE" <<EOF
-name: Update Stacked PRs on Squash Merge (E2E Test)
-on:
-  pull_request:
-    types: [closed, synchronize]
-permissions:
-  contents: write
-  pull-requests: write
-jobs:
-  update-pr-stack:
-    # Only run on actual squash merges initiated by the test script
-    if: |
-      github.event.action == 'closed' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.merge_commit_sha != ''
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          # Fetch all history for all branches and tags
-          fetch-depth: 0
-          # Use a PAT token for checkout to allow pushing updates
-          token: \${{ secrets.GITHUB_TOKEN }}
-      - name: Update PR stack
-        # Use the action from the current repository checkout
-        uses: ./
-        with:
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-  continue-after-conflict-resolution:
-    # Run when a PR with the conflict label is updated (user pushed conflict resolution)
-    if: |
-      github.event.action == 'synchronize' &&
-      contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: \${{ secrets.GITHUB_TOKEN }}
-      - name: Continue PR stack update after conflict resolution
-        uses: ./
-        with:
-          github-token: \${{ secrets.GITHUB_TOKEN }}
-          mode: conflict-resolved
-          pr-branch: \${{ github.event.pull_request.head.ref }}
-EOF
+cp "$PROJECT_ROOT/.github/workflows/$WORKFLOW_FILE" .github/workflows/
 
-log_cmd git add action.yml update-pr-stack.sh command_utils.sh .github/workflows/"$WORKFLOW_FILE"
+# Replace @main with the current commit SHA to test exactly what we pushed
+sed -i "s|uses: Phlogistique/autorestack-action@main|uses: Phlogistique/autorestack-action@$ACTION_REPO_COMMIT|g" .github/workflows/"$WORKFLOW_FILE"
+echo >&2 "Modified workflow to use action at commit $ACTION_REPO_COMMIT"
+
+log_cmd git add .github/workflows/"$WORKFLOW_FILE"
 log_cmd git commit -m "Add action and workflow files"
 log_cmd git push origin main
 

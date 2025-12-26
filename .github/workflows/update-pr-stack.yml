@@ -7,35 +7,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  repository-projects: read # See https://github.com/cli/cli/discussions/5307
 
 jobs:
   update-pr-stack:
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Update PR stack
-        uses: ./
+      - uses: Phlogistique/autorestack-action@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  continue-after-conflict-resolution:
-    if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Continue PR stack update after conflict resolution
-        uses: ./
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          mode: conflict-resolved
-          pr-branch: ${{ github.event.pull_request.head.ref }}
