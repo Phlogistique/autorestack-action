@@ -44,9 +44,24 @@ After you manually resolve the conflict and push:
 
 ### Setup
 
+**1. Disable auto-delete head branches**
+
+The action manages branch deletion itself. GitHub's auto-delete setting must be disabled:
+
+**Via Settings:**
+- Go to your repository Settings → General → Pull Requests
+- Uncheck "Automatically delete head branches"
+
+**Via GitHub CLI:**
+```bash
+gh api -X PATCH "/repos/OWNER/REPO" --input - <<< '{"delete_branch_on_merge":false}'
+```
+
+**2. Add the workflow**
+
 Create a `.github/workflows/update-pr-stack.yml` file:
 ```yaml
-name: Update Stacked PRs on Squash Merge
+name: Update PR Stack
 
 on:
   pull_request:
@@ -55,38 +70,14 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  repository-projects: read
 
 jobs:
   update-pr-stack:
-    if: github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.merge_commit_sha != ''
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Update PR stack
-        uses: Phlogistique/autorestack-action@main
+      - uses: Phlogistique/autorestack-action@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  continue-after-conflict-resolution:
-    if: github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'autorestack-needs-conflict-resolution')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          fetch-depth: 0
-
-      - name: Continue PR stack update
-        uses: Phlogistique/autorestack-action@main
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          mode: conflict-resolved
-          pr-branch: ${{ github.event.pull_request.head.ref }}
 ```
 
 ### Notes
