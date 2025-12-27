@@ -38,7 +38,7 @@
 #
 # Setup:
 #   - Create a stack of 4 PRs: main <- feature1 <- feature2 <- feature3 <- feature4
-#   - Each PR modifies line 2 of file.txt (same line, different content)
+#   - Each PR modifies line 2 (shared, accumulates) plus a unique line (3, 4, 5)
 #
 # Action Trigger:
 #   - Squash merge PR1 (feature1) into main
@@ -621,6 +621,9 @@ log_cmd git push origin main
 
 # 4. Create stacked PRs
 echo >&2 "4. Creating stacked branches and PRs..."
+# Each PR modifies:
+# - Line 2 (shared line, accumulates through the stack - tests merge handling)
+# - A unique line (for diff pollution visibility)
 # Branch feature1 (base: main)
 log_cmd git checkout -b feature1 main
 sed -i '2s/.*/Feature 1 content line 2/' file.txt # Edit line 2
@@ -632,7 +635,8 @@ PR1_NUM=$(echo "$PR1_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR1_NUM: $PR1_URL"
 # Branch feature2 (base: feature1)
 log_cmd git checkout -b feature2 feature1
-sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2 again
+sed -i '2s/.*/Feature 2 content line 2/' file.txt # Edit line 2 (shared)
+sed -i '3s/.*/Feature 2 content line 3/' file.txt # Edit line 3 (unique)
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 2"
 log_cmd git push origin feature2
@@ -641,7 +645,8 @@ PR2_NUM=$(echo "$PR2_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR2_NUM: $PR2_URL"
 # Branch feature3 (base: feature2)
 log_cmd git checkout -b feature3 feature2
-sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2 again
+sed -i '2s/.*/Feature 3 content line 2/' file.txt # Edit line 2 (shared)
+sed -i '4s/.*/Feature 3 content line 4/' file.txt # Edit line 4 (unique)
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 3"
 log_cmd git push origin feature3
@@ -651,7 +656,8 @@ echo >&2 "Created PR #$PR3_NUM: $PR3_URL"
 
 # Branch feature4 (base: feature3) - tests grandchildren in conflict resolution
 log_cmd git checkout -b feature4 feature3
-sed -i '2s/.*/Feature 4 content line 2/' file.txt # Edit line 2 again
+sed -i '2s/.*/Feature 4 content line 2/' file.txt # Edit line 2 (shared)
+sed -i '5s/.*/Feature 4 content line 5/' file.txt # Edit line 5 (unique)
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 4"
 log_cmd git push origin feature4
@@ -745,10 +751,10 @@ else
 fi
 # Verify diffs (using triple-dot diff against the *new* base: main)
 echo >&2 "Verifying diff content for updated PRs..."
-# Expected diff for feature2 vs main (should only contain feature2 changes relative to feature1)
-# Note: The content check here is tricky because the base changed. We check the PR diff on GitHub.
-EXPECTED_DIFF2_CONTENT="Feature 2 content line 2"
-ACTUAL_DIFF2_CONTENT=$(log_cmd gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 2' | sed 's/^+//')
+# Check that each PR's unique line is present in the diff
+# (We grep for "line N" to match only the unique line, not the shared line 2)
+EXPECTED_DIFF2_CONTENT="Feature 2 content line 3"
+ACTUAL_DIFF2_CONTENT=$(log_cmd gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 3' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF2_CONTENT" == "$EXPECTED_DIFF2_CONTENT" ]]; then
     echo >&2 "✅ Verification Passed: Diff content for PR #$PR2_NUM seems correct."
@@ -761,8 +767,8 @@ else
 fi
 
 # Expected diff for feature3 vs feature2 (should only contain feature3 changes relative to feature2)
-EXPECTED_DIFF3_CONTENT="Feature 3 content line 2"
-ACTUAL_DIFF3_CONTENT=$(log_cmd gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 3' | sed 's/^+//')
+EXPECTED_DIFF3_CONTENT="Feature 3 content line 4"
+ACTUAL_DIFF3_CONTENT=$(log_cmd gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 4' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF3_CONTENT" == "$EXPECTED_DIFF3_CONTENT" ]]; then
     echo >&2 "✅ Verification Passed: Diff content for PR #$PR3_NUM seems correct."
@@ -775,8 +781,8 @@ else
 fi
 
 # Expected diff for feature4 vs feature3 (should only contain feature4 changes relative to feature3)
-EXPECTED_DIFF4_CONTENT="Feature 4 content line 2"
-ACTUAL_DIFF4_CONTENT=$(log_cmd gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME" | grep '^+Feature 4' | sed 's/^+//')
+EXPECTED_DIFF4_CONTENT="Feature 4 content line 5"
+ACTUAL_DIFF4_CONTENT=$(log_cmd gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 5' | sed 's/^+//')
 
 if [[ "$ACTUAL_DIFF4_CONTENT" == "$EXPECTED_DIFF4_CONTENT" ]]; then
     echo >&2 "✅ Verification Passed: Diff content for PR #$PR4_NUM seems correct."
