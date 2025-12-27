@@ -48,7 +48,7 @@ After you manually resolve the conflict and push:
 
 The action manages branch deletion itself. GitHub's auto-delete setting must be disabled:
 
-**Via Settings (recommended):**
+**Via Settings:**
 - Go to your repository Settings → General → Pull Requests
 - Uncheck "Automatically delete head branches"
 
