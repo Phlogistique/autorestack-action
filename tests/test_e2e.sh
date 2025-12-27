@@ -749,51 +749,6 @@ else
     log_cmd git log --graph --oneline feature4 main
     exit 1
 fi
-# Verify diffs (using triple-dot diff against the *new* base: main)
-echo >&2 "Verifying diff content for updated PRs..."
-# Check that each PR's unique line is present in the diff
-# (We grep for "line N" to match only the unique line, not the shared line 2)
-EXPECTED_DIFF2_CONTENT="Feature 2 content line 3"
-ACTUAL_DIFF2_CONTENT=$(log_cmd gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 3' | sed 's/^+//')
-
-if [[ "$ACTUAL_DIFF2_CONTENT" == "$EXPECTED_DIFF2_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR2_NUM seems correct."
-else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR2_NUM is incorrect."
-    echo "Expected Added Line Content: $EXPECTED_DIFF2_CONTENT"
-    echo "Actual Added Line Content: $ACTUAL_DIFF2_CONTENT"
-    gh pr diff "$PR2_URL" --repo "$REPO_FULL_NAME"
-    exit 1
-fi
-
-# Expected diff for feature3 vs feature2 (should only contain feature3 changes relative to feature2)
-EXPECTED_DIFF3_CONTENT="Feature 3 content line 4"
-ACTUAL_DIFF3_CONTENT=$(log_cmd gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 4' | sed 's/^+//')
-
-if [[ "$ACTUAL_DIFF3_CONTENT" == "$EXPECTED_DIFF3_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR3_NUM seems correct."
-else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR3_NUM is incorrect."
-    echo "Expected Added Line Content: $EXPECTED_DIFF3_CONTENT"
-    echo "Actual Added Line Content: $ACTUAL_DIFF3_CONTENT"
-    gh pr diff "$PR3_URL" --repo "$REPO_FULL_NAME"
-    exit 1
-fi
-
-# Expected diff for feature4 vs feature3 (should only contain feature4 changes relative to feature3)
-EXPECTED_DIFF4_CONTENT="Feature 4 content line 5"
-ACTUAL_DIFF4_CONTENT=$(log_cmd gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME" | grep '^+.*line 5' | sed 's/^+//')
-
-if [[ "$ACTUAL_DIFF4_CONTENT" == "$EXPECTED_DIFF4_CONTENT" ]]; then
-    echo >&2 "✅ Verification Passed: Diff content for PR #$PR4_NUM seems correct."
-else
-    echo >&2 "❌ Verification Failed: Diff content for PR #$PR4_NUM is incorrect."
-    echo "Expected Added Line Content: $EXPECTED_DIFF4_CONTENT"
-    echo "Actual Added Line Content: $ACTUAL_DIFF4_CONTENT"
-    gh pr diff "$PR4_URL" --repo "$REPO_FULL_NAME"
-    exit 1
-fi
-
 # Verify diffs are preserved (identical to initial)
 echo >&2 "Verifying diffs are preserved after action..."
 PR2_DIFF_AFTER=$(get_pr_diff "$PR2_URL")
