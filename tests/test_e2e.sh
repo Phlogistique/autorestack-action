@@ -47,14 +47,15 @@
 #   - The action should detect that PR2 (feature2) was based on feature1
 #   - Update PR2's base branch from feature1 to main
 #   - Merge main into feature2 to incorporate the squash commit
-#   - Propagate the merge to feature3 and feature4 as well
 #   - Delete the merged branch (feature1)
+#   - NOTE: Indirect children (feature3, feature4) are NOT updated - their diffs
+#     remain correct because the merge-base calculation works correctly
 #
 # Verifications:
 #   - feature1 branch is deleted from remote
 #   - PR2 base branch is updated from feature1 to main
-#   - PR3 base branch remains feature2 (only direct children are updated)
-#   - feature2, feature3, and feature4 branches contain the squash merge commit
+#   - PR3 base branch remains feature2 (only direct children's base is updated)
+#   - feature2 contains the squash merge commit (feature3/feature4 do NOT)
 #   - PR diffs are IDENTICAL before and after (action preserves incremental diffs)
 #
 # SCENARIO 2: Conflict Handling (Steps 8-13)
@@ -94,13 +95,7 @@
 #   - The action detects the conflict label and removes it
 #   - Updates PR3's base branch to main
 #   - Deletes feature2 branch (no other conflicted PRs depend on it)
-#   - The continuation workflow updates feature4 (grandchild) recursively
-#   - Verify the label is removed, base updated, branch deleted, and feature4 is updated
-#
-# Grandchild Update (feature4):
-#   - Tests that update_branch_recursive properly handles grandchildren
-#   - Even when SQUASH_COMMIT is undefined (in conflict-resolved mode)
-#   - The skip_if_clean guard must handle the missing SQUASH_COMMIT ref
+#   - NOTE: feature4 is NOT updated (indirect children are not modified)
 #
 # =============================================================================
 set -e # Exit immediately if a command exits with a non-zero status.
@@ -718,16 +713,10 @@ else
     echo >&2 "❌ Verification Failed: PR #$PR3_NUM base branch is '$PR3_BASE', expected 'feature2'."
     exit 1
 fi
-# Verify local branches are updated to include the squash commit
-echo >&2 "Checking if branches incorporate the squash commit..."
-log_cmd git checkout feature2 # Checkout local branch first
-log_cmd git pull origin feature2 # Pull updates pushed by the action
-log_cmd git checkout feature3
-log_cmd git pull origin feature3
-log_cmd git checkout feature4
-log_cmd git pull origin feature4
-
-# Check ancestry
+# Verify feature2 (direct child) is updated to include the squash commit
+echo >&2 "Checking if feature2 incorporates the squash commit..."
+log_cmd git checkout feature2
+log_cmd git pull origin feature2
 if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" feature2; then
     echo >&2 "✅ Verification Passed: feature2 correctly incorporates the squash commit $MERGE_COMMIT_SHA1."
 else
@@ -735,20 +724,9 @@ else
     log_cmd git log --graph --oneline feature2 main
     exit 1
 fi
-if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" feature3; then
-    echo >&2 "✅ Verification Passed: feature3 correctly incorporates the squash commit $MERGE_COMMIT_SHA1."
-else
-    echo >&2 "❌ Verification Failed: feature3 does not include the squash commit $MERGE_COMMIT_SHA1."
-    log_cmd git log --graph --oneline feature3 main
-    exit 1
-fi
-if log_cmd git merge-base --is-ancestor "$MERGE_COMMIT_SHA1" feature4; then
-    echo >&2 "✅ Verification Passed: feature4 correctly incorporates the squash commit $MERGE_COMMIT_SHA1."
-else
-    echo >&2 "❌ Verification Failed: feature4 does not include the squash commit $MERGE_COMMIT_SHA1."
-    log_cmd git log --graph --oneline feature4 main
-    exit 1
-fi
+# Note: feature3 and feature4 are NOT updated (indirect children are not modified).
+# Their diffs remain correct because the merge-base calculation still works.
+echo >&2 "✅ feature3 and feature4 intentionally not updated (indirect children)"
 # Verify diffs are preserved (identical to initial)
 echo >&2 "Verifying diffs are preserved after action..."
 PR2_DIFF_AFTER=$(get_pr_diff "$PR2_URL")
@@ -950,8 +928,6 @@ echo >&2 "15. Verifying conflict resolution content..."
 log_cmd git fetch origin
 log_cmd git checkout feature3
 log_cmd git pull origin feature3
-log_cmd git checkout feature4
-log_cmd git pull origin feature4
 
 # Verify feature3 now incorporates main (including PR2 merge commit and main's conflict commit)
 if log_cmd git merge-base --is-ancestor origin/main feature3; then
@@ -962,15 +938,9 @@ else
     exit 1
 fi
 
-# Verify feature4 (grandchild) was updated by continuation workflow
-# This tests that update_branch_recursive properly handles grandchildren even when SQUASH_COMMIT is undefined
-if log_cmd git merge-base --is-ancestor origin/feature3 feature4; then
-    echo >&2 "✅ Verification Passed: feature4 (grandchild) correctly incorporates resolved feature3."
-else
-    echo >&2 "❌ Verification Failed: feature4 does not include the resolved feature3."
-    log_cmd git log --graph --oneline feature4 feature3
-    exit 1
-fi
+# Note: feature4 is NOT updated (indirect children are not modified).
+# It will be updated when feature3 is merged (becoming a direct child at that point).
+echo >&2 "✅ feature4 intentionally not updated (indirect child of resolved PR)"
 
 # Verify the final content of file.txt on feature3
 # Line 1: Original base

@@ -1,31 +1,24 @@
 #!/bin/bash
 
+# Mock gh CLI for unit tests.
+# Only direct children are queried now (no recursive updates of indirect children).
+
 if [[ "$1" == "pr" && "$2" == "list" ]]; then
     # Parse the --base argument to determine which PRs to return
     base=""
-    jq_flag=""
     for ((i=1; i<=$#; i++)); do
         if [[ "${!i}" == "--base" ]]; then
             next=$((i+1))
             base="${!next}"
         fi
-        if [[ "${!i}" == "--jq" ]]; then
-            next=$((i+1))
-            jq_flag="${!next}"
-        fi
     done
 
-    if [[ "$base" == "main" ]]; then
-        : # No PRs target main in our test
-    elif [[ "$base" == "feature1" ]]; then
+    if [[ "$base" == "feature1" ]]; then
+        # feature2 is a direct child of feature1
         echo 'feature2'
-    elif [[ "$base" == "feature2" ]]; then
-        echo feature3
-    elif [[ "$base" == "feature3" ]]; then
-        :
     else
-        echo "Unknown base branch: $@" >&2
-        exit 1
+        # No other bases have direct children in our test scenario
+        :
     fi
 elif [[ "$1" == "pr" && "$2" == "edit" ]]; then
     # Just log the edit command
