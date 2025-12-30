@@ -16,12 +16,6 @@ simulate_push() {
     log_cmd git update-ref "refs/remotes/origin/$branch_name" "$branch_name"
 }
 
-# Helper function to simulate 'git push origin :<branch>'
-simulate_delete_remote_branch() {
-    local branch_name="$1"
-    log_cmd git update-ref -d "refs/remotes/origin/$branch_name"
-}
-
 # Create a temporary directory for the test repository
 TEST_REPO=$(mktemp -d)
 cd "$TEST_REPO"
@@ -102,8 +96,15 @@ else
 fi
 
 # Verify feature3 is NOT modified (indirect children are not updated)
-FEATURE3_ORIGINAL=$(log_cmd git rev-parse feature3)
-echo "✅ feature3 remains unchanged (indirect children not updated)"
+# We stored the original SHA before running the script, now verify it hasn't changed
+FEATURE3_AFTER=$(log_cmd git rev-parse feature3)
+FEATURE3_BEFORE=$(log_cmd git rev-parse origin/feature3)
+if [[ "$FEATURE3_AFTER" == "$FEATURE3_BEFORE" ]]; then
+    echo "✅ feature3 remains unchanged (indirect children not updated)"
+else
+    echo "❌ feature3 was modified unexpectedly"
+    exit 1
+fi
 
 # Show the contents of feature2 to verify it contains the expected changes
 echo -e "\nContent of feature2 branch:"
