@@ -649,14 +649,14 @@ PR3_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature2 --head f
 PR3_NUM=$(echo "$PR3_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR3_NUM: $PR3_URL"
 
-# Branch feature4 (base: feature3) - tests grandchildren in conflict resolution
+# Branch feature4 (base: feature3) - tests that indirect children's diffs remain correct
 log_cmd git checkout -b feature4 feature3
 sed -i '2s/.*/Feature 4 content line 2/' file.txt # Edit line 2 (shared)
 sed -i '5s/.*/Feature 4 content line 5/' file.txt # Edit line 5 (unique)
 log_cmd git add file.txt
 log_cmd git commit -m "Add feature 4"
 log_cmd git push origin feature4
-PR4_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature3 --head feature4 --title "Feature 4" --body "This is PR 4, based on PR 3 (grandchild for conflict resolution test)")
+PR4_URL=$(log_cmd gh pr create --repo "$REPO_FULL_NAME" --base feature3 --head feature4 --title "Feature 4" --body "This is PR 4, based on PR 3 (indirect child, tests diff preservation)")
 PR4_NUM=$(echo "$PR4_URL" | awk -F'/' '{print $NF}')
 echo >&2 "Created PR #$PR4_NUM: $PR4_URL"
 
