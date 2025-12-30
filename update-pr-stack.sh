@@ -121,41 +121,6 @@ update_direct_target() {
     return 0
 }
 
-update_indirect_target() {
-    local BRANCH="$1"
-    local BASE_BRANCH="$2"
-
-    # At this point in the control flow:
-    # - BASE_BRANCH has already been checked out and potentially modified locally
-    # - BRANCH has not been touched yet
-    #
-    # We checkout BRANCH first (which creates the local branch from origin if
-    # needed), then compare against the local BASE_BRANCH to check if it's
-    # already an ancestor.
-    log_cmd git checkout "$BRANCH"
-
-    if git merge-base --is-ancestor "$BASE_BRANCH" "$BRANCH"; then
-        echo "✓ $BRANCH already up-to-date with $BASE_BRANCH; skipping"
-        return
-    fi
-
-    echo "Updating indirect target $BRANCH (based on $BASE_BRANCH)"
-    log_cmd git merge --no-edit "$BASE_BRANCH"
-}
-
-ALL_CHILDREN=()
-update_branch_recursive() {
-    local BRANCH="$1"
-
-    # Find and update branches based on this one
-    CHILD_BRANCHES=$(log_cmd gh pr list --base "$BRANCH" --json headRefName --jq '.[].headRefName')
-    ALL_CHILDREN+=($CHILD_BRANCHES)
-    for CHILD_BRANCH in $CHILD_BRANCHES; do
-        update_indirect_target "$CHILD_BRANCH" "$BRANCH"
-        update_branch_recursive "$CHILD_BRANCH"
-    done
-}
-
 # Check if a PR has the conflict resolution label
 pr_has_conflict_label() {
     local BRANCH="$1"
@@ -226,52 +191,6 @@ continue_after_resolution() {
             log_cmd git push origin ":$OLD_BASE" || echo "⚠️ Could not delete '$OLD_BASE' (may already be deleted)"
         fi
     fi
-
-    # Find and update child PRs (PRs based on this branch)
-    CHILD_BRANCHES=$(log_cmd gh pr list --base "$PR_BRANCH" --json headRefName --jq '.[].headRefName')
-
-    if [[ -z "$CHILD_BRANCHES" ]]; then
-        echo "✓ No child PRs to update"
-        return
-    fi
-
-    ALL_CHILDREN=()
-    for CHILD_BRANCH in $CHILD_BRANCHES; do
-        echo "Updating child branch $CHILD_BRANCH based on $PR_BRANCH"
-        log_cmd git checkout "$CHILD_BRANCH"
-        if ! log_cmd git merge --no-edit "origin/$PR_BRANCH"; then
-            echo "⚠️ Merge conflict updating $CHILD_BRANCH"
-            log_cmd git merge --abort
-            # Add conflict label to the child PR
-            gh label create "$CONFLICT_LABEL" --description "PR needs manual conflict resolution" --color "d73a4a" 2>/dev/null || true
-            log_cmd gh pr edit "$CHILD_BRANCH" --add-label "$CONFLICT_LABEL"
-            {
-                echo "### ⚠️ Automatic update blocked by merge conflicts"
-                echo
-                echo "I tried to merge \`origin/$PR_BRANCH\` into this branch while continuing the PR stack update and hit conflicts."
-                echo
-                echo "#### How to resolve"
-                echo '```bash'
-                echo "git fetch origin"
-                echo "git switch $CHILD_BRANCH"
-                echo "git merge origin/$PR_BRANCH"
-                echo "# ..."
-                echo "# fix conflicts, for instance with \`git mergetool\`"
-                echo "# ..."
-                echo "git commit"
-                echo "git push"
-                echo '```'
-            } | log_cmd gh pr comment "$CHILD_BRANCH" -F -
-            continue
-        fi
-        ALL_CHILDREN+=("$CHILD_BRANCH")
-        update_branch_recursive "$CHILD_BRANCH"
-    done
-
-    # Push all updated branches
-    if [[ "${#ALL_CHILDREN[@]}" -gt 0 ]]; then
-        log_cmd git push origin "${ALL_CHILDREN[@]}"
-    fi
 }
 
 main() {
@@ -292,10 +211,8 @@ main() {
     for BRANCH in "${INITIAL_TARGETS[@]}"; do
         if update_direct_target "$BRANCH" "$TARGET_BRANCH"; then
             UPDATED_TARGETS+=("$BRANCH")
-            update_branch_recursive "$BRANCH"
         else
             CONFLICTED_TARGETS+=("$BRANCH")
-            echo "⚠️ Skipping descendants of $BRANCH until conflicts are resolved"
         fi
     done
 
@@ -307,11 +224,11 @@ main() {
     # Push updated branches; only delete merged branch if no conflicts
     if [[ "${#CONFLICTED_TARGETS[@]}" -eq 0 ]]; then
         # No conflicts - safe to delete merged branch
-        log_cmd git push origin ":$MERGED_BRANCH" "${UPDATED_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+        log_cmd git push origin ":$MERGED_BRANCH" "${UPDATED_TARGETS[@]}"
     else
         # Some conflicts - keep merged branch for reference during manual resolution
-        if [[ "${#UPDATED_TARGETS[@]}" -gt 0 || "${#ALL_CHILDREN[@]}" -gt 0 ]]; then
-            log_cmd git push origin "${UPDATED_TARGETS[@]}" "${ALL_CHILDREN[@]}"
+        if [[ "${#UPDATED_TARGETS[@]}" -gt 0 ]]; then
+            log_cmd git push origin "${UPDATED_TARGETS[@]}"
         fi
         echo "⚠️ Keeping branch '$MERGED_BRANCH' - still referenced by conflicted PRs: ${CONFLICTED_TARGETS[*]}"
     fi

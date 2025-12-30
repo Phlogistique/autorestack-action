@@ -17,11 +17,12 @@ This action tries to fix that in a transparent way. Install it, and hopefully th
 ### How it works
 
 1. Triggers when a PR is squash merged
-2. Finds PRs that were based on the merged branch
-3. For direct children: creates a synthetic merge commit with three parents (child tip, deleted branch tip, squash commit) to preserve history without re-introducing code
-4. For indirect descendants: merges the updated parent branch
-5. Updates the direct child PRs to base on trunk now that the bottom change has landed; higher PRs stay based on their parent
-6. Force-pushes updated branches and deletes the merged branch
+2. Finds PRs that were based on the merged branch (direct children only)
+3. Creates a synthetic merge commit with three parents (child tip, deleted branch tip, squash commit) to preserve history without re-introducing code
+4. Updates the direct child PRs to base on trunk now that the bottom change has landed
+5. Force-pushes updated branches and deletes the merged branch
+
+**Note:** Indirect descendants (grandchildren, etc.) are intentionally not modified. Their PR diffs remain correct because the merge-base calculation still works—the synthetic merge commit includes the original parent commit as an ancestor. When their direct parent is eventually merged, they become direct children and get updated at that point.
 
 ### Conflict handling
 
@@ -38,7 +39,6 @@ After you manually resolve the conflict and push:
 2. The action detects the conflict label and removes it
 3. Updates the PR's base branch to trunk
 4. Deletes the old base branch (if no other conflicted PRs still depend on it)
-5. Continues updating any dependent PRs in the stack
 
 ---
 
