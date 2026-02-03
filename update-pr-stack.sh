@@ -99,7 +99,7 @@ update_direct_target() {
             for conflict in "${CONFLICTS[@]}"; do
                 echo "git merge $conflict"
                 echo "# ..."
-                echo "# fix conflicts, for instance with `git mergetool`"
+                echo '# fix conflicts, for instance with `git mergetool`'
                 echo "# ..."
                 echo "git commit"
             done
