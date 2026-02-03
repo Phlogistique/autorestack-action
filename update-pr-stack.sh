@@ -111,7 +111,7 @@ update_direct_target() {
         log_cmd gh pr edit "$BRANCH" --add-label "$CONFLICT_LABEL"
         return 1
     else
-        log_cmd git merge --no-edit -s ours "$SQUASH_COMMIT"
+        log_cmd git merge --no-edit -s ours SQUASH_COMMIT
         log_cmd git update-ref MERGE_RESULT "HEAD^{tree}"
         COMMIT_MSG="Merge updates from $BASE_BRANCH and squash commit"
         CUSTOM_COMMIT=$(log_cmd git commit-tree MERGE_RESULT -p BEFORE_MERGE -p "origin/$MERGED_BRANCH" -p SQUASH_COMMIT -m "$COMMIT_MSG")
