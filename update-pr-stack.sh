@@ -152,6 +152,16 @@ post_conflict_comment() {
     run gh pr edit "$PR_NUMBER" --add-label "$CONFLICT_LABEL"
 }
 
+# Deleting a PR's base branch closes the PR, so callers must retarget first.
+# The branch can already be gone by then: a human clicking "Delete branch" right
+# after the merge races this run, and "delete branch on merge" wins it outright.
+# Everything that matters is done at that point, so a failed delete is a warning,
+# not a red run.
+delete_merged_branch() {
+    try git push origin ":$MERGED_BRANCH" \
+        || echo "⚠️ Could not delete '$MERGED_BRANCH' (may already be deleted)"
+}
+
 # Args: head branch, base branch, PR number. git commands use the branch; gh
 # commands use the number, since a head branch can carry several PRs.
 update_direct_target() {
@@ -381,8 +391,7 @@ main() {
             [[ -n "$BRANCH" ]] || continue
             run gh pr edit "$NUMBER" --base "$TARGET_BRANCH"
         done <<<"$CHILDREN"
-        # Deleting a PR's base branch closes the PR, so the retargets come first.
-        run git push origin ":$MERGED_BRANCH"
+        delete_merged_branch
         return 0
     fi
 
@@ -427,10 +436,9 @@ main() {
         run gh pr edit "$NUMBER" --base "$TARGET_BRANCH"
     done
 
-    # Deleting a PR's base branch closes the PR, so this must come after the
-    # retargets. Keep the branch for reference while conflicted PRs remain.
+    # Keep the branch for reference while conflicted PRs remain.
     if [[ "${#CONFLICTED_TARGETS[@]}" -eq 0 ]]; then
-        run git push origin ":$MERGED_BRANCH"
+        delete_merged_branch
     else
         echo "⚠️ Keeping branch '$MERGED_BRANCH' - still referenced by conflicted PRs: ${CONFLICTED_TARGETS[*]}"
     fi
